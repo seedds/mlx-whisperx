@@ -191,8 +191,7 @@ Decoding options:
 
 Precision and model-cache options:
 
-- `--compute_type default`: use `--fp16`.
-- `--compute_type float16`: force MLX ASR fp16.
+- `--compute_type float16`: force MLX ASR fp16. This is the default.
 - `--compute_type float32`: force MLX ASR fp32.
 - `--model_dir`: cache directory for alignment, pyannote VAD, and diarization models.
 - `--model_cache_only`: cached alignment models only. This does not affect ASR model downloads yet.

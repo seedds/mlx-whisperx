@@ -33,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model_dir", default=None, help="Directory for alignment, pyannote VAD, and diarization model cache; ASR uses Hugging Face cache unless --model is a local path")
     parser.add_argument("--model_cache_only", type=str2bool, default=False, help="Use cached alignment models only; does not affect ASR model downloads yet")
     parser.add_argument("--device", default="cpu", help="Torch device for VAD/alignment/diarization stages")
-    parser.add_argument("--compute_type", default="default", choices=["default", "float16", "float32"], help="ASR precision mapping: default uses --fp16, float16 sets fp16=True, float32 sets fp16=False")
+    parser.add_argument("--compute_type", default="float16", choices=["float16", "float32"], help="ASR precision: float16 is faster/lower memory, float32 is slower/higher precision")
 
     parser.add_argument("--output_dir", "-o", default=".", help="Directory to save outputs")
     parser.add_argument("--output_name", default=None, help="Output basename. Defaults to input file stem")
@@ -75,7 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--initial_prompt", default=None, help="Initial prompt")
     parser.add_argument("--hotwords", default=None, help="Hint phrases appended to the initial prompt")
     parser.add_argument("--condition_on_previous_text", type=str2bool, default=False, help="Prompt backend windows with previous text inside each VAD chunk; does not carry context across VAD chunks")
-    parser.add_argument("--fp16", type=str2bool, default=True, help="Use fp16 for MLX ASR when --compute_type is default")
+    parser.add_argument("--fp16", type=str2bool, default=True, help="Low-level ASR fp16 flag; CLI --compute_type overrides this")
     parser.add_argument("--compression_ratio_threshold", type=optional_float, default=2.4, help="Repetition failure threshold")
     parser.add_argument("--logprob_threshold", type=optional_float, default=-1.0, help="Low confidence failure threshold")
     parser.add_argument("--no_speech_threshold", type=optional_float, default=0.6, help="No-speech threshold")
