@@ -33,7 +33,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model_dir", default=None, help="Directory for alignment/diarization model cache; ASR uses Hugging Face cache unless --model is a local path")
     parser.add_argument("--model_cache_only", type=str2bool, default=False, help="Use cached alignment models only; does not affect ASR model downloads yet")
     parser.add_argument("--device", default="cpu", help="Torch device for VAD/alignment/diarization stages")
-    parser.add_argument("--batch_size", default=8, type=int, help="Accepted for WhisperX CLI parity; ASR currently runs chunks serially")
     parser.add_argument("--compute_type", default="default", choices=["default", "float16", "float32"], help="ASR precision mapping: default uses --fp16, float16 sets fp16=True, float32 sets fp16=False")
 
     parser.add_argument("--output_dir", "-o", default=".", help="Directory to save outputs")

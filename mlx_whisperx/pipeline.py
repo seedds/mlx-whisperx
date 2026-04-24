@@ -45,7 +45,6 @@ def _merge_suppress_tokens(suppress_tokens: str | Sequence[int] | None, extra_to
 @dataclass
 class PipelineOptions:
     model: str = "mlx-community/whisper-turbo"
-    batch_size: int = 8
     task: str = "transcribe"
     language: Optional[str] = None
     temperature: float | Sequence[float] = 0.0
@@ -236,8 +235,6 @@ class MLXWhisperXPipeline:
             json.dump(payload, file, ensure_ascii=False, indent=2)
 
     def _asr(self, audio: np.ndarray, vad_chunks: list[dict]) -> dict:
-        if self.options.batch_size not in (0, 1, None):
-            logger.info("batch_size is accepted for API parity; current ASR wrapper decodes VAD chunks serially")
         suppress_tokens: str | list[int] = self.options.suppress_tokens
         if self.options.suppress_numerals:
             logger.info("Suppressing numeral and symbol tokens")

@@ -9,7 +9,6 @@ def transcribe(
     audio: str | np.ndarray,
     *,
     model: str = "mlx-community/whisper-turbo",
-    batch_size: int = 8,
     task: str = "transcribe",
     language: Optional[str] = None,
     temperature: float | Sequence[float] = 0.0,
