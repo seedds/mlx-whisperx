@@ -1,8 +1,11 @@
 from .vad import Segment, Vad
 
 
+DEFAULT_PYANNOTE_VAD_MODEL = "pyannote/segmentation-3.0"
+
+
 class Pyannote(Vad):
-    def __init__(self, device, token=None, model_fp=None, **kwargs):
+    def __init__(self, device, token=None, model_name=None, cache_dir=None, **kwargs):
         super().__init__(kwargs["vad_onset"])
         try:
             import torch
@@ -22,11 +25,17 @@ class Pyannote(Vad):
         self.vad_offset = kwargs.get("vad_offset", self.vad_onset)
         self.chunk_size = kwargs["chunk_size"]
 
-        if model_fp is None:
-            from pathlib import Path
-
-            model_fp = Path(__file__).resolve().parents[2] / "whisperX" / "whisperx" / "assets" / "pytorch_model.bin"
-        model = Model.from_pretrained(str(model_fp), token=token)
+        model_name = model_name or DEFAULT_PYANNOTE_VAD_MODEL
+        try:
+            model = Model.from_pretrained(model_name, token=token, cache_dir=cache_dir)
+            if model is None:
+                raise RuntimeError("model loader returned None")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not load pyannote VAD model {model_name!r}. If the model is gated, "
+                "accept its Hugging Face terms and pass --hf_token. Otherwise use the default "
+                "Silero VAD with --vad_method silero."
+            ) from exc
         pipeline = VoiceActivityDetection(segmentation=model, device=torch.device(device))
         pipeline.instantiate(
             {

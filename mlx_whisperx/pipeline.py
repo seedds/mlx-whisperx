@@ -64,6 +64,7 @@ class PipelineOptions:
     vad_method: str = "silero"
     vad_onset: float = 0.500
     vad_offset: float = 0.363
+    vad_model: Optional[str] = None
     chunk_size: int = 30
     no_vad: bool = False
     align_model: Optional[str] = None
@@ -172,6 +173,8 @@ class MLXWhisperXPipeline:
             vad_model = VadClass(
                 self.options.device,
                 token=self.options.hf_token,
+                model_name=self.options.vad_model,
+                cache_dir=self.options.model_dir,
                 vad_onset=self.options.vad_onset,
                 vad_offset=self.options.vad_offset,
                 chunk_size=self.options.chunk_size,
@@ -211,6 +214,7 @@ class MLXWhisperXPipeline:
             "vad_method": self.options.vad_method,
             "vad_onset": self.options.vad_onset,
             "vad_offset": self.options.vad_offset,
+            "vad_model": self.options.vad_model,
             "chunk_size": self.options.chunk_size,
             "no_vad": self.options.no_vad,
             "audio_duration": round(audio_duration, 3),

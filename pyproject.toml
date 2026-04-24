@@ -1,7 +1,7 @@
 [project]
 name = "mlx-whisperx"
 version = "0.1.0"
-description = "WhisperX-style transcription pipeline using an internal MLX Whisper ASR backend."
+description = "WhisperX-style transcription pipeline using an internal mlx-whisper ASR backend."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"

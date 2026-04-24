@@ -28,6 +28,7 @@ def transcribe(
     vad_method: str = "silero",
     vad_onset: float = 0.500,
     vad_offset: float = 0.363,
+    vad_model: Optional[str] = None,
     chunk_size: int = 30,
     no_vad: bool = False,
     vad_dump_path: Optional[str] = None,
