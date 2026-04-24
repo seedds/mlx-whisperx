@@ -21,6 +21,30 @@ audio -> VAD -> mlx-whisper ASR -> forced alignment -> optional diarization -> w
 mlx-whisperx audio.wav --model mlx-community/whisper-turbo --output_format all
 ```
 
+To write `000.json` next to `000.m4a`:
+
+```bash
+mlx-whisperx 000.m4a --output_format json --output_dir .
+```
+
+To inspect the VAD chunks used before ASR:
+
+```bash
+mlx-whisperx 000.m4a --output_format json --output_dir . --vad_dump_path 000.vad.json
+```
+
+To generate wrapped SRT subtitles:
+
+```bash
+mlx-whisperx 000.m4a --output_format srt --output_dir . --max_line_width 42 --max_line_count 2 --highlight_words False
+```
+
+To suppress numeric and currency-symbol tokens during decoding, matching the WhisperX alignment workaround:
+
+```bash
+mlx-whisperx 000.m4a --output_format srt --output_dir . --suppress_numerals
+```
+
 The default VAD backend is Silero so the base pipeline does not require a working
 pyannote install. Use `--vad_method pyannote` if your PyTorch/pyannote stack is
 configured correctly.
@@ -34,3 +58,19 @@ mlx-whisperx audio.wav --diarize --hf_token YOUR_HF_TOKEN
 ## Notes
 
 The first implementation calls the original `mlx_whisper.transcribe()` for each VAD chunk. This favors correctness and isolation. Batched MLX decoding can be added later inside this project without modifying `mlx-examples/`.
+
+## Parity checks
+
+Compare generated JSON against a WhisperX reference JSON:
+
+```bash
+mlx-whisperx-parity sample_out_000.json 000.json
+```
+
+For machine-readable metrics:
+
+```bash
+mlx-whisperx-parity sample_out_000.json 000.json --json
+```
+
+The parity harness reports schema compatibility, segment/word counts, language match, rough WER, text similarity, matched-word timing drift, and positional word timing drift. Matched-word timing drift ignores inserted/deleted words when possible, which makes it more useful when one output includes extra intro or outro text.

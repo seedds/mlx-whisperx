@@ -39,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output_dir", "-o", default=".", help="Directory to save outputs")
     parser.add_argument("--output_name", default=None, help="Output basename. Defaults to input file stem")
     parser.add_argument("--output_format", "-f", default="all", choices=["all", "srt", "vtt", "txt", "tsv", "json", "aud"], help="Output format")
-    parser.add_argument("--verbose", type=str2bool, default=True, help="Print progress/logging")
+    parser.add_argument("--verbose", type=str2bool, default=True, help="Print transcript/logging")
     parser.add_argument("--log-level", default=None, choices=["debug", "info", "warning", "error", "critical"], help="Logging level")
 
     parser.add_argument("--task", default="transcribe", choices=["transcribe", "translate"], help="Speech recognition or translation")
@@ -55,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vad_offset", type=float, default=0.363, help="VAD offset threshold")
     parser.add_argument("--chunk_size", type=int, default=30, help="Merged VAD chunk size in seconds")
     parser.add_argument("--no_vad", action="store_true", help="Skip VAD and transcribe the full file as one chunk")
+    parser.add_argument("--vad_dump_path", default=None, help="Write VAD chunks and settings to this JSON path")
 
     parser.add_argument("--diarize", action="store_true", help="Assign speaker labels")
     parser.add_argument("--min_speakers", default=None, type=int, help="Minimum number of speakers")
@@ -70,7 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--patience", type=optional_float, default=1.0, help="Beam-search patience")
     parser.add_argument("--length_penalty", type=optional_float, default=1.0, help="Length penalty")
     parser.add_argument("--suppress_tokens", default="-1", help="Comma-separated token IDs to suppress")
-    parser.add_argument("--suppress_numerals", action="store_true", help="Accepted for parity; not implemented yet")
+    parser.add_argument("--suppress_numerals", action="store_true", help="Suppress numeric and currency-symbol tokens during decoding")
     parser.add_argument("--initial_prompt", default=None, help="Initial prompt")
     parser.add_argument("--hotwords", default=None, help="Hint phrases appended to the initial prompt")
     parser.add_argument("--condition_on_previous_text", type=str2bool, default=False, help="Prompt each chunk with previous text")

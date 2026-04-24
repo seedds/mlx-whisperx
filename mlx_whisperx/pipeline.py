@@ -1,6 +1,9 @@
 import gc
-import warnings
+import importlib
+import json
+import pathlib
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Optional, Sequence
 
 import numpy as np
@@ -14,6 +17,29 @@ from .vads import get_vad_class
 
 
 logger = get_logger(__name__)
+NUMERAL_SYMBOLS = "0123456789%$£"
+
+
+@lru_cache(maxsize=32)
+def _find_numeral_symbol_tokens(language: Optional[str], task: str) -> tuple[int, ...]:
+    tokenizer_module = importlib.import_module("mlx_whisper.tokenizer")
+    tokenizer = tokenizer_module.get_tokenizer(True, language=language or "en", task=task)
+    numeral_symbol_tokens: list[int] = []
+    for token_id in range(tokenizer.eot):
+        token = tokenizer.decode([token_id]).removeprefix(" ")
+        if any(char in NUMERAL_SYMBOLS for char in token):
+            numeral_symbol_tokens.append(token_id)
+    return tuple(numeral_symbol_tokens)
+
+
+def _merge_suppress_tokens(suppress_tokens: str | Sequence[int] | None, extra_tokens: Sequence[int]) -> list[int]:
+    if suppress_tokens is None:
+        parsed_tokens: list[int] = []
+    elif isinstance(suppress_tokens, str):
+        parsed_tokens = [int(token) for token in suppress_tokens.split(",") if token]
+    else:
+        parsed_tokens = [int(token) for token in suppress_tokens]
+    return sorted(set(parsed_tokens).union(extra_tokens))
 
 
 @dataclass
@@ -56,6 +82,7 @@ class PipelineOptions:
     device: str = "cpu"
     verbose: bool = False
     print_progress: bool = False
+    vad_dump_path: Optional[str] = None
 
 
 class MLXWhisperXPipeline:
@@ -137,7 +164,9 @@ class MLXWhisperXPipeline:
     def _vad_chunks(self, audio: np.ndarray) -> list[dict]:
         duration = len(audio) / SAMPLE_RATE
         if self.options.no_vad:
-            return [{"start": 0.0, "end": duration, "segments": [(0.0, duration)]}]
+            chunks = [{"start": 0.0, "end": duration, "segments": [(0.0, duration)]}]
+            self._dump_vad_chunks(chunks, duration)
+            return chunks
 
         VadClass = get_vad_class(self.options.vad_method)
         if self.options.vad_method == "pyannote":
@@ -171,15 +200,53 @@ class MLXWhisperXPipeline:
             onset=self.options.vad_onset,
             offset=self.options.vad_offset,
         )
-        return [chunk for chunk in chunks if chunk["end"] > chunk["start"]]
+        chunks = [chunk for chunk in chunks if chunk["end"] > chunk["start"]]
+        self._dump_vad_chunks(chunks, duration)
+        return chunks
+
+    def _dump_vad_chunks(self, chunks: list[dict], audio_duration: float) -> None:
+        if not self.options.vad_dump_path:
+            return
+
+        payload = {
+            "vad_method": self.options.vad_method,
+            "vad_onset": self.options.vad_onset,
+            "vad_offset": self.options.vad_offset,
+            "chunk_size": self.options.chunk_size,
+            "no_vad": self.options.no_vad,
+            "audio_duration": round(audio_duration, 3),
+            "chunk_count": len(chunks),
+            "chunks": [
+                {
+                    "index": index,
+                    "start": round(float(chunk["start"]), 3),
+                    "end": round(float(chunk["end"]), 3),
+                    "duration": round(float(chunk["end"]) - float(chunk["start"]), 3),
+                    "segments": [
+                        {"start": round(float(start), 3), "end": round(float(end), 3)}
+                        for start, end in chunk.get("segments", [])
+                    ],
+                }
+                for index, chunk in enumerate(chunks)
+            ],
+        }
+        output_path = pathlib.Path(self.options.vad_dump_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("w", encoding="utf-8") as file:
+            json.dump(payload, file, ensure_ascii=False, indent=2)
 
     def _asr(self, audio: np.ndarray, vad_chunks: list[dict]) -> dict:
         if self.options.batch_size not in (0, 1, None):
             logger.info("batch_size is accepted for API parity; current ASR wrapper decodes VAD chunks serially")
         if self.options.beam_size is not None:
             logger.info("beam_size is accepted for API parity but ignored because mlx-whisper beam search is not implemented")
+        suppress_tokens: str | list[int] = self.options.suppress_tokens
         if self.options.suppress_numerals:
-            warnings.warn("--suppress_numerals is accepted but not implemented for mlx-whisper decoding yet")
+            logger.info("Suppressing numeral and symbol tokens")
+            suppress_tokens = _merge_suppress_tokens(
+                self.options.suppress_tokens,
+                _find_numeral_symbol_tokens(self.options.language, self.options.task),
+            )
 
         language = self.options.language
         all_segments: list[dict] = []
@@ -202,7 +269,7 @@ class MLXWhisperXPipeline:
                 "task": self.options.task,
                 "best_of": self.options.best_of,
                 "length_penalty": self.options.length_penalty,
-                "suppress_tokens": self.options.suppress_tokens,
+                "suppress_tokens": suppress_tokens,
                 "fp16": self.options.fp16,
                 "without_timestamps": True,
             }
@@ -211,7 +278,7 @@ class MLXWhisperXPipeline:
             chunk_result = self._mlx_whisper.transcribe(
                 chunk_audio,
                 path_or_hf_repo=self.options.model,
-                verbose=False,
+                verbose=None,
                 temperature=self.options.temperature,
                 compression_ratio_threshold=self.options.compression_ratio_threshold,
                 logprob_threshold=self.options.logprob_threshold,
@@ -233,14 +300,19 @@ class MLXWhisperXPipeline:
                 text = segment.get("text", "")
                 if not text.strip():
                     continue
-                all_segments.append(
-                    {
-                        "start": round(start + float(segment.get("start", 0.0)), 3),
-                        "end": round(start + float(segment.get("end", end - start)), 3),
-                        "text": text,
-                        **({"avg_logprob": segment["avg_logprob"]} if "avg_logprob" in segment else {}),
-                    }
-                )
+                asr_segment = {
+                    "start": round(start + float(segment.get("start", 0.0)), 3),
+                    "end": round(start + float(segment.get("end", end - start)), 3),
+                    "text": text,
+                    **({"avg_logprob": segment["avg_logprob"]} if "avg_logprob" in segment else {}),
+                }
+                all_segments.append(asr_segment)
+                if self.options.verbose:
+                    print(
+                        "Transcript: "
+                        f"[{asr_segment['start']} --> {asr_segment['end']}] "
+                        f"{text.strip()}"
+                    )
 
             if self.options.print_progress:
                 print(f"Progress: {((idx + 1) / total) * 50:.2f}%...")

@@ -31,6 +31,7 @@ def transcribe(
     vad_offset: float = 0.363,
     chunk_size: int = 30,
     no_vad: bool = False,
+    vad_dump_path: Optional[str] = None,
     align_model: Optional[str] = None,
     no_align: bool = False,
     interpolate_method: str = "nearest",

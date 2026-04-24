@@ -16,6 +16,7 @@ class Silero(Vad):
             force_reload=False,
             onnx=False,
             trust_repo=True,
+            verbose=False,
         )
         self.get_speech_timestamps = vad_utils[0]
 
