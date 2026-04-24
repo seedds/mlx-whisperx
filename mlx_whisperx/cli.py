@@ -30,11 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("audio", nargs="+", type=str, help="Audio file(s) to transcribe")
     parser.add_argument("--model", default="mlx-community/whisper-turbo", help="mlx-whisper model directory or Hugging Face repo")
-    parser.add_argument("--model_dir", default=None, help="Directory for alignment/diarization model cache")
-    parser.add_argument("--model_cache_only", type=str2bool, default=False, help="Use cached alignment models only")
+    parser.add_argument("--model_dir", default=None, help="Directory for alignment/diarization model cache; ASR uses Hugging Face cache unless --model is a local path")
+    parser.add_argument("--model_cache_only", type=str2bool, default=False, help="Use cached alignment models only; does not affect ASR model downloads yet")
     parser.add_argument("--device", default="cpu", help="Torch device for VAD/alignment/diarization stages")
     parser.add_argument("--batch_size", default=8, type=int, help="Accepted for WhisperX CLI parity; ASR currently runs chunks serially")
-    parser.add_argument("--compute_type", default="default", choices=["default", "float16", "float32"], help="Controls fp16 passed to mlx-whisper")
+    parser.add_argument("--compute_type", default="default", choices=["default", "float16", "float32"], help="ASR precision mapping: default uses --fp16, float16 sets fp16=True, float32 sets fp16=False")
 
     parser.add_argument("--output_dir", "-o", default=".", help="Directory to save outputs")
     parser.add_argument("--output_name", default=None, help="Output basename. Defaults to input file stem")
@@ -66,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature")
     parser.add_argument("--temperature_increment_on_fallback", type=optional_float, default=None, help="Temperature fallback increment")
-    parser.add_argument("--best_of", type=optional_int, default=5, help="Number of candidates when sampling")
+    parser.add_argument("--best_of", type=optional_int, default=5, help="Number of candidates when sampling with temperature > 0; ignored at temperature 0")
     parser.add_argument("--beam_size", type=optional_int, default=5, help="Beam size when temperature is zero")
     parser.add_argument("--patience", type=optional_float, default=1.0, help="Beam-search patience")
     parser.add_argument("--length_penalty", type=optional_float, default=1.0, help="Length penalty")
@@ -74,8 +74,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--suppress_numerals", action="store_true", help="Suppress numeric and currency-symbol tokens during decoding")
     parser.add_argument("--initial_prompt", default=None, help="Initial prompt")
     parser.add_argument("--hotwords", default=None, help="Hint phrases appended to the initial prompt")
-    parser.add_argument("--condition_on_previous_text", type=str2bool, default=False, help="Prompt each chunk with previous text")
-    parser.add_argument("--fp16", type=str2bool, default=True, help="Use fp16 in mlx-whisper")
+    parser.add_argument("--condition_on_previous_text", type=str2bool, default=False, help="Prompt backend windows with previous text inside each VAD chunk; does not carry context across VAD chunks")
+    parser.add_argument("--fp16", type=str2bool, default=True, help="Use fp16 for MLX ASR when --compute_type is default")
     parser.add_argument("--compression_ratio_threshold", type=optional_float, default=2.4, help="Repetition failure threshold")
     parser.add_argument("--logprob_threshold", type=optional_float, default=-1.0, help="Low confidence failure threshold")
     parser.add_argument("--no_speech_threshold", type=optional_float, default=0.6, help="No-speech threshold")
@@ -84,7 +84,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max_line_count", type=optional_int, default=None, help="Subtitle line count option")
     parser.add_argument("--max_words_per_line", type=optional_int, default=None, help="Subtitle words per cue")
     parser.add_argument("--highlight_words", type=str2bool, default=False, help="Highlight words in SRT/VTT")
-    parser.add_argument("--segment_resolution", default="sentence", choices=["sentence", "chunk"], help="Accepted for parity; alignment currently returns sentence segments")
     parser.add_argument("--print_progress", type=str2bool, default=False, help="Print stage progress")
     return parser
 
@@ -109,13 +108,13 @@ def main() -> None:
         "max_line_width": args.pop("max_line_width"),
         "max_words_per_line": args.pop("max_words_per_line"),
     }
-    args.pop("segment_resolution")
-
     if writer_args["max_line_count"] and not writer_args["max_line_width"]:
         warnings.warn("--max_line_count has no effect without --max_line_width")
 
     compute_type = args.pop("compute_type")
-    if compute_type == "float32":
+    if compute_type == "float16":
+        args["fp16"] = True
+    elif compute_type == "float32":
         args["fp16"] = False
 
     increment = args.pop("temperature_increment_on_fallback")
