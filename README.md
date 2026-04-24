@@ -1,84 +1,320 @@
 # mlx-whisperx
 
-WhisperX-style transcription pipeline using an internal MLX Whisper ASR backend.
+`mlx-whisperx` is a WhisperX-style transcription pipeline for Apple Silicon. It uses a vendored MLX Whisper ASR backend, then optionally applies WhisperX forced alignment and pyannote diarization.
 
-This project is intentionally separate from the checked-out source folders:
-
-- `whisperX/`
-- `mlx-examples/`
-
-Those folders are treated as read-only references/dependencies.
+The project is intended to provide a practical local pipeline with WhisperX-like JSON, subtitle, and text outputs while keeping ASR execution on MLX.
 
 ## Pipeline
 
 ```text
-audio -> VAD -> internal MLX Whisper ASR -> forced alignment -> optional diarization -> writers
+audio -> VAD -> MLX Whisper ASR -> forced alignment -> optional diarization -> writers
 ```
 
-## Usage
+Default behavior:
+
+- ASR model: `mlx-community/whisper-turbo`
+- VAD backend: Silero
+- Decoding: beam search with `beam_size=5` and `temperature=0`
+- Alignment: enabled for transcription
+- Diarization: disabled unless `--diarize` is passed
+
+## Installation
+
+Clone the repository and install it into a Python environment:
 
 ```bash
-mlx-whisperx audio.wav --model mlx-community/whisper-turbo --output_format all
+git clone https://github.com/seedds/mlx-whisperx.git
+cd mlx-whisperx
+python -m pip install -e .
 ```
 
-Default decoding uses `--beam_size 5` and `--temperature 0`.
+`ffmpeg` must be available on `PATH` because audio loading is handled through the ffmpeg CLI.
 
-To write `000.json` next to `000.m4a`:
+On macOS with Homebrew:
 
 ```bash
-mlx-whisperx 000.m4a --output_format json --output_dir .
+brew install ffmpeg
 ```
 
-To inspect the VAD chunks used before ASR:
+Optional diarization uses pyannote models and may require a Hugging Face token, depending on the selected model.
+
+## Quick Start
+
+Write every supported output format next to the input file:
 
 ```bash
-mlx-whisperx 000.m4a --output_format json --output_dir . --vad_dump_path 000.vad.json
+mlx-whisperx audio.wav --output_dir . --output_format all
 ```
 
-To generate wrapped SRT subtitles:
+Write only JSON:
 
 ```bash
-mlx-whisperx 000.m4a --output_format srt --output_dir . --max_line_width 42 --max_line_count 2 --highlight_words False
+mlx-whisperx audio.wav --output_dir . --output_format json
 ```
 
-To suppress numeric and currency-symbol tokens during decoding, matching the WhisperX alignment workaround:
+Use a specific MLX Whisper model and language:
 
 ```bash
-mlx-whisperx 000.m4a --output_format srt --output_dir . --suppress_numerals
+mlx-whisperx audio.wav \
+  --model mlx-community/whisper-large-v3-turbo \
+  --language en \
+  --output_format json
 ```
 
-To use beam-search decoding:
+Generate subtitles:
 
 ```bash
-mlx-whisperx 000.m4a --language en --output_format json --beam_size 5 --temperature 0
+mlx-whisperx audio.wav \
+  --output_format srt \
+  --max_line_width 42 \
+  --max_line_count 2
 ```
 
-The default VAD backend is Silero so the base pipeline does not require a working
-pyannote install. Use `--vad_method pyannote` if your PyTorch/pyannote stack is
-configured correctly.
-
-With diarization:
+Enable word highlighting in SRT/VTT:
 
 ```bash
-mlx-whisperx audio.wav --diarize --hf_token YOUR_HF_TOKEN
+mlx-whisperx audio.wav --output_format vtt --highlight_words True
 ```
 
-## Notes
+## Python API
 
-The ASR backend is vendored under `mlx_whisperx.backend.mlx_whisper` so this project can support decoder changes such as beam search without modifying `mlx-examples/` or requiring an external `mlx-whisper` install. ASR still decodes VAD chunks serially; batched MLX decoding can be added later.
+```python
+from mlx_whisperx import transcribe
 
-## Parity checks
+result = transcribe(
+    "audio.wav",
+    model="mlx-community/whisper-large-v3-turbo",
+    language="en",
+)
+```
 
-Compare generated JSON against a WhisperX reference JSON:
+Print one transcript segment per line:
+
+```python
+for segment in result["segments"]:
+    print(segment["text"].strip())
+```
+
+Print segment timestamps:
+
+```python
+for segment in result["segments"]:
+    print(f"[{segment['start']:.2f} -> {segment['end']:.2f}] {segment['text'].strip()}")
+```
+
+Print word-level timestamps:
+
+```python
+for word in result["word_segments"]:
+    print(f"[{word['start']:.2f} -> {word['end']:.2f}] {word['word']}")
+```
+
+Common API options match the CLI names:
+
+```python
+result = transcribe(
+    "audio.wav",
+    model="mlx-community/whisper-turbo",
+    language="en",
+    beam_size=5,
+    temperature=0.0,
+    no_align=False,
+    diarize=False,
+    vad_method="silero",
+)
+```
+
+## Output Schema
+
+JSON output follows the WhisperX-style shape:
+
+```json
+{
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 2.5,
+      "text": "Example transcript text.",
+      "words": [
+        {"word": "Example", "start": 0.0, "end": 0.6, "score": 0.98}
+      ]
+    }
+  ],
+  "word_segments": [
+    {"word": "Example", "start": 0.0, "end": 0.6, "score": 0.98}
+  ],
+  "language": "en"
+}
+```
+
+When diarization is enabled, speaker labels are included where available:
+
+```json
+{"word": "Hello", "start": 0.0, "end": 0.4, "score": 0.99, "speaker": "SPEAKER_00"}
+```
+
+## CLI Reference
+
+Basic options:
+
+- `--model`: MLX Whisper model directory or Hugging Face repo.
+- `--language`: language code. If omitted, language is auto-detected by ASR.
+- `--task`: `transcribe` or `translate`.
+- `--output_format`: `all`, `srt`, `vtt`, `txt`, `tsv`, `json`, or `aud`.
+- `--output_dir`: directory for output files.
+- `--output_name`: custom output basename.
+- `--verbose`: print transcript and logs.
+
+Decoding options:
+
+- `--temperature`: sampling temperature. Default is `0.0`.
+- `--beam_size`: beam size when `temperature=0`. Default is `5`.
+- `--best_of`: number of candidates when sampling with `temperature > 0`.
+- `--patience`: beam-search patience.
+- `--length_penalty`: beam-search length penalty.
+- `--suppress_tokens`: comma-separated token IDs to suppress.
+- `--suppress_numerals`: suppress numeric and currency-symbol tokens.
+- `--initial_prompt`: initial prompt for ASR.
+- `--hotwords`: hint phrases appended to the prompt.
+- `--condition_on_previous_text`: prompt backend windows with previous text inside each VAD chunk.
+
+Precision and model-cache options:
+
+- `--compute_type default`: use `--fp16`.
+- `--compute_type float16`: force MLX ASR fp16.
+- `--compute_type float32`: force MLX ASR fp32.
+- `--model_dir`: cache directory for alignment and diarization models only.
+- `--model_cache_only`: cached alignment models only. This does not affect ASR model downloads yet.
+
+VAD options:
+
+- `--vad_method silero`: default VAD backend.
+- `--vad_method pyannote`: use pyannote VAD if your environment supports it.
+- `--vad_onset`: VAD onset threshold.
+- `--vad_offset`: VAD offset threshold.
+- `--chunk_size`: merged VAD chunk size in seconds.
+- `--no_vad`: transcribe the full file as one chunk.
+- `--vad_dump_path`: write VAD chunks and settings to JSON.
+
+Alignment options:
+
+- `--no_align`: skip forced alignment.
+- `--align_model`: override the alignment model.
+- `--interpolate_method`: `nearest`, `linear`, or `ignore`.
+- `--return_char_alignments`: include character alignments in JSON.
+
+Diarization options:
+
+- `--diarize`: assign speaker labels.
+- `--diarize_model`: pyannote diarization model name.
+- `--min_speakers`: minimum speaker count.
+- `--max_speakers`: maximum speaker count.
+- `--speaker_embeddings`: include speaker embeddings in JSON when available.
+- `--hf_token`: Hugging Face token for gated pyannote models.
+
+Subtitle options:
+
+- `--max_line_width`: target subtitle line width.
+- `--max_line_count`: maximum lines per subtitle cue. Requires `--max_line_width`.
+- `--max_words_per_line`: maximum words per subtitle cue.
+- `--highlight_words`: underline the active word in SRT/VTT output.
+
+## Examples
+
+Inspect VAD chunks before ASR:
 
 ```bash
-mlx-whisperx-parity sample_out_000.json 000.json
+mlx-whisperx audio.wav \
+  --output_format json \
+  --vad_dump_path audio.vad.json
 ```
 
-For machine-readable metrics:
+Run deterministic beam search explicitly:
 
 ```bash
-mlx-whisperx-parity sample_out_000.json 000.json --json
+mlx-whisperx audio.wav \
+  --language en \
+  --temperature 0 \
+  --beam_size 5 \
+  --output_format json
 ```
 
-The parity harness reports schema compatibility, segment/word counts, language match, rough WER, text similarity, matched-word timing drift, and positional word timing drift. Matched-word timing drift ignores inserted/deleted words when possible, which makes it more useful when one output includes extra intro or outro text.
+Use temperature fallback:
+
+```bash
+mlx-whisperx audio.wav \
+  --temperature 0 \
+  --temperature_increment_on_fallback 0.2
+```
+
+Suppress numerals and currency symbols during decoding:
+
+```bash
+mlx-whisperx audio.wav --suppress_numerals --output_format json
+```
+
+Skip forced alignment:
+
+```bash
+mlx-whisperx audio.wav --no_align --output_format json
+```
+
+Run diarization:
+
+```bash
+mlx-whisperx audio.wav \
+  --diarize \
+  --hf_token YOUR_HF_TOKEN \
+  --output_format json
+```
+
+Process multiple files:
+
+```bash
+mlx-whisperx first.wav second.wav third.wav --output_dir transcripts --output_format all
+```
+
+## Parity Tool
+
+`mlx-whisperx-parity` compares generated JSON against a reference WhisperX JSON file.
+
+```bash
+mlx-whisperx-parity reference.json generated.json
+```
+
+Machine-readable output:
+
+```bash
+mlx-whisperx-parity reference.json generated.json --json
+```
+
+The report includes schema compatibility, segment and word counts, language match, rough WER, text similarity, matched-word timing drift, and positional word timing drift.
+
+## Current Behavior and Limitations
+
+- ASR decodes merged VAD chunks serially.
+- There is no `batch_size` CLI or API option.
+- `translate` skips forced alignment because alignment models are transcription-language specific.
+- `model_dir` and `model_cache_only` currently apply to alignment and diarization model loading, not ASR model downloads.
+- Pyannote VAD and diarization depend on a compatible PyTorch, torchaudio, and pyannote installation.
+- The vendored ASR backend lives under `mlx_whisperx.backend.mlx_whisper` so decoder behavior can be changed without modifying external reference repositories.
+
+## Development Checks
+
+Compile the package:
+
+```bash
+python -m py_compile mlx_whisperx/**/*.py
+```
+
+Check CLI help:
+
+```bash
+python -m mlx_whisperx --help
+```
+
+Build a wheel:
+
+```bash
+python -m build
+```
