@@ -22,7 +22,7 @@ NUMERAL_SYMBOLS = "0123456789%$£"
 
 @lru_cache(maxsize=32)
 def _find_numeral_symbol_tokens(language: Optional[str], task: str) -> tuple[int, ...]:
-    tokenizer_module = importlib.import_module("mlx_whisper.tokenizer")
+    tokenizer_module = importlib.import_module("mlx_whisperx.backend.mlx_whisper.tokenizer")
     tokenizer = tokenizer_module.get_tokenizer(True, language=language or "en", task=task)
     numeral_symbol_tokens: list[int] = []
     for token_id in range(tokenizer.eot):
@@ -48,7 +48,7 @@ class PipelineOptions:
     batch_size: int = 8
     task: str = "transcribe"
     language: Optional[str] = None
-    temperature: float | Sequence[float] = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+    temperature: float | Sequence[float] = 0.0
     best_of: Optional[int] = 5
     beam_size: Optional[int] = 5
     patience: Optional[float] = 1.0
@@ -238,8 +238,6 @@ class MLXWhisperXPipeline:
     def _asr(self, audio: np.ndarray, vad_chunks: list[dict]) -> dict:
         if self.options.batch_size not in (0, 1, None):
             logger.info("batch_size is accepted for API parity; current ASR wrapper decodes VAD chunks serially")
-        if self.options.beam_size is not None:
-            logger.info("beam_size is accepted for API parity but ignored because mlx-whisper beam search is not implemented")
         suppress_tokens: str | list[int] = self.options.suppress_tokens
         if self.options.suppress_numerals:
             logger.info("Suppressing numeral and symbol tokens")
@@ -268,6 +266,8 @@ class MLXWhisperXPipeline:
                 "language": language,
                 "task": self.options.task,
                 "best_of": self.options.best_of,
+                "beam_size": self.options.beam_size,
+                "patience": self.options.patience,
                 "length_penalty": self.options.length_penalty,
                 "suppress_tokens": suppress_tokens,
                 "fp16": self.options.fp16,

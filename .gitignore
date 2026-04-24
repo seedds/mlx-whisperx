@@ -12,6 +12,8 @@ mlx_whisperx_test_outputs/
 __pycache__/
 *.py[cod]
 *.egg-info/
+build/
+dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

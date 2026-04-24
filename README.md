@@ -1,6 +1,6 @@
 # mlx-whisperx
 
-WhisperX-style transcription pipeline using `mlx-whisper` as the ASR backend.
+WhisperX-style transcription pipeline using an internal MLX Whisper ASR backend.
 
 This project is intentionally separate from the checked-out source folders:
 
@@ -12,7 +12,7 @@ Those folders are treated as read-only references/dependencies.
 ## Pipeline
 
 ```text
-audio -> VAD -> mlx-whisper ASR -> forced alignment -> optional diarization -> writers
+audio -> VAD -> internal MLX Whisper ASR -> forced alignment -> optional diarization -> writers
 ```
 
 ## Usage
@@ -20,6 +20,8 @@ audio -> VAD -> mlx-whisper ASR -> forced alignment -> optional diarization -> w
 ```bash
 mlx-whisperx audio.wav --model mlx-community/whisper-turbo --output_format all
 ```
+
+Default decoding uses `--beam_size 5` and `--temperature 0`.
 
 To write `000.json` next to `000.m4a`:
 
@@ -45,6 +47,12 @@ To suppress numeric and currency-symbol tokens during decoding, matching the Whi
 mlx-whisperx 000.m4a --output_format srt --output_dir . --suppress_numerals
 ```
 
+To use beam-search decoding:
+
+```bash
+mlx-whisperx 000.m4a --language en --output_format json --beam_size 5 --temperature 0
+```
+
 The default VAD backend is Silero so the base pipeline does not require a working
 pyannote install. Use `--vad_method pyannote` if your PyTorch/pyannote stack is
 configured correctly.
@@ -57,7 +65,7 @@ mlx-whisperx audio.wav --diarize --hf_token YOUR_HF_TOKEN
 
 ## Notes
 
-The first implementation calls the original `mlx_whisper.transcribe()` for each VAD chunk. This favors correctness and isolation. Batched MLX decoding can be added later inside this project without modifying `mlx-examples/`.
+The ASR backend is vendored under `mlx_whisperx.backend.mlx_whisper` so this project can support decoder changes such as beam search without modifying `mlx-examples/` or requiring an external `mlx-whisper` install. ASR still decodes VAD chunks serially; batched MLX decoding can be added later.
 
 ## Parity checks
 

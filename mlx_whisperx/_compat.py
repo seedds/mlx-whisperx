@@ -31,8 +31,7 @@ def ensure_local_whisperx() -> None:
 
 def import_mlx_whisper():
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-    ensure_local_mlx_whisper()
-    return importlib.import_module("mlx_whisper")
+    return importlib.import_module("mlx_whisperx.backend.mlx_whisper")
 
 
 def import_whisperx_module(name: str):

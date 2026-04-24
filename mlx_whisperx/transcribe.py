@@ -12,7 +12,7 @@ def transcribe(
     batch_size: int = 8,
     task: str = "transcribe",
     language: Optional[str] = None,
-    temperature: float | Sequence[float] = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+    temperature: float | Sequence[float] = 0.0,
     best_of: Optional[int] = 5,
     beam_size: Optional[int] = 5,
     patience: Optional[float] = 1.0,
