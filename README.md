@@ -1,13 +1,24 @@
 # mlx-whisperx
 
-`mlx-whisperx` is a WhisperX-style transcription pipeline for Apple Silicon. It uses a vendored MLX Whisper ASR backend, then optionally applies WhisperX forced alignment and pyannote diarization.
+`mlx-whisperx` is a WhisperX-style transcription pipeline for Apple Silicon. It uses a vendored `mlx-whisper` ASR backend, then optionally applies WhisperX forced alignment and pyannote diarization.
 
 The project is intended to provide a practical local pipeline with WhisperX-like JSON, subtitle, and text outputs while keeping ASR execution on MLX.
+
+## Why This Project Exists
+
+This project adds WhisperX-like functionality to an `mlx-whisper` workflow. The goal is to keep ASR inference on MLX for Apple Silicon while providing the pipeline pieces people commonly use from WhisperX: VAD chunking, forced alignment, word timestamps, diarization hooks, and familiar JSON/subtitle outputs.
+
+The implementation borrows ideas and code from both upstream projects:
+
+- WhisperX, for the pipeline structure, alignment workflow, diarization integration, and output conventions.
+- `mlx-whisper`, for the Apple Silicon ASR backend and model execution path.
+
+This repository vendors and adapts code where needed so the pieces work together as a standalone `mlx-whisperx` package.
 
 ## Pipeline
 
 ```text
-audio -> VAD -> MLX Whisper ASR -> forced alignment -> optional diarization -> writers
+audio -> VAD -> mlx-whisper ASR -> forced alignment -> optional diarization -> writers
 ```
 
 Default behavior:
@@ -52,7 +63,7 @@ Write only JSON:
 mlx-whisperx audio.wav --output_dir . --output_format json
 ```
 
-Use a specific MLX Whisper model and language:
+Use a specific `mlx-whisper` model and language:
 
 ```bash
 mlx-whisperx audio.wav \
@@ -157,7 +168,7 @@ When diarization is enabled, speaker labels are included where available:
 
 Basic options:
 
-- `--model`: MLX Whisper model directory or Hugging Face repo.
+- `--model`: `mlx-whisper` model directory or Hugging Face repo.
 - `--language`: language code. If omitted, language is auto-detected by ASR.
 - `--task`: `transcribe` or `translate`.
 - `--output_format`: `all`, `srt`, `vtt`, `txt`, `tsv`, `json`, or `aud`.
@@ -273,22 +284,6 @@ Process multiple files:
 ```bash
 mlx-whisperx first.wav second.wav third.wav --output_dir transcripts --output_format all
 ```
-
-## Parity Tool
-
-`mlx-whisperx-parity` compares generated JSON against a reference WhisperX JSON file.
-
-```bash
-mlx-whisperx-parity reference.json generated.json
-```
-
-Machine-readable output:
-
-```bash
-mlx-whisperx-parity reference.json generated.json --json
-```
-
-The report includes schema compatibility, segment and word counts, language match, rough WER, text similarity, matched-word timing drift, and positional word timing drift.
 
 ## Current Behavior and Limitations
 

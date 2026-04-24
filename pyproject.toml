@@ -24,7 +24,6 @@ dependencies = [
 
 [project.scripts]
 mlx-whisperx = "mlx_whisperx.cli:main"
-mlx-whisperx-parity = "mlx_whisperx.parity:main"
 
 [build-system]
 requires = ["setuptools>=61"]
