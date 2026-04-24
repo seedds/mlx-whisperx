@@ -1,0 +1,35 @@
+[project]
+name = "mlx-whisperx"
+version = "0.1.0"
+description = "WhisperX-style transcription pipeline using mlx-whisper as the ASR backend."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "mlx-whisper",
+    "mlx>=0.11",
+    "numpy",
+    "numba",
+    "more-itertools",
+    "tiktoken",
+    "huggingface-hub",
+    "scipy",
+    "pandas",
+    "torch",
+    "torchaudio",
+    "transformers",
+    "pyannote-audio",
+    "nltk",
+    "tqdm",
+]
+
+[project.scripts]
+mlx-whisperx = "mlx_whisperx.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mlx_whisperx*"]

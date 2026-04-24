@@ -1,0 +1,28 @@
+# Reference repositories kept locally, not vendored into this project
+whisperX/
+mlx-examples/
+
+# Local media and comparison outputs
+*.m4a
+sample_out_*.json
+mlx_whisperx_compare_out/
+mlx_whisperx_test_outputs/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments and local config
+.venv/
+venv/
+.env
+.env.*
+
+# OS/editor files
+.DS_Store
+.idea/
+.vscode/
