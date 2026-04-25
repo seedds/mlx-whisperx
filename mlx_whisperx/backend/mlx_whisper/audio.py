@@ -1,5 +1,12 @@
 # Copyright © 2023 Apple Inc.
 
+"""Audio and spectrogram utilities for the vendored MLX Whisper backend.
+
+Whisper models consume 30-second log-Mel windows at 16 kHz. This module contains the
+fixed audio constants, ffmpeg loading path, and a small MLX STFT implementation used
+to generate those model inputs.
+"""
+
 import os
 from functools import lru_cache
 from subprocess import CalledProcessError, run
@@ -8,7 +15,8 @@ from typing import Optional, Union
 import mlx.core as mx
 import numpy as np
 
-# hard-coded audio hyperparameters
+# Hard-coded Whisper audio hyperparameters. These values are part of the model
+# contract: changing them would make positional embeddings and timestamp math wrong.
 SAMPLE_RATE = 16000
 N_FFT = 400
 HOP_LENGTH = 160
@@ -68,11 +76,14 @@ def pad_or_trim(array, length: int = N_SAMPLES, *, axis: int = -1):
     Pad or trim the audio array to N_SAMPLES, as expected by the encoder.
     """
     if array.shape[axis] > length:
+        # Trim from the right; Whisper windows are always anchored at the current seek
+        # position, so excess samples belong to a future window.
         sl = [slice(None)] * array.ndim
         sl[axis] = slice(0, length)
         array = array[tuple(sl)]
 
     if array.shape[axis] < length:
+        # Right-pad with silence to satisfy the fixed encoder input shape.
         pad_widths = [(0, 0)] * array.ndim
         pad_widths[axis] = (0, length - array.shape[axis])
         array = mx.pad(array, pad_widths)
@@ -100,16 +111,19 @@ def mel_filters(n_mels: int) -> mx.array:
 
 @lru_cache(maxsize=None)
 def hanning(size):
+    """Return a cached periodic Hann window as an MLX array."""
     return mx.array(np.hanning(size + 1)[:-1])
 
 
 def stft(x, window, nperseg=256, noverlap=None, nfft=None, axis=-1, pad_mode="reflect"):
+    """Compute a lightweight one-dimensional STFT using MLX operations."""
     if nfft is None:
         nfft = nperseg
     if noverlap is None:
         noverlap = nfft // 4
 
     def _pad(x, padding, pad_mode="constant"):
+        """Pad the signal before framing, matching Whisper's reflect padding."""
         if pad_mode == "constant":
             return mx.pad(x, [(padding, padding)])
         elif pad_mode == "reflect":
@@ -122,6 +136,7 @@ def stft(x, window, nperseg=256, noverlap=None, nfft=None, axis=-1, pad_mode="re
     padding = nperseg // 2
     x = _pad(x, padding, pad_mode)
 
+    # Frame the waveform with overlapping strided views, then run an RFFT per frame.
     strides = [noverlap, 1]
     t = (x.size - nperseg + noverlap) // noverlap
     shape = [t, nfft]
@@ -154,11 +169,15 @@ def log_mel_spectrogram(
         An  array that contains the Mel spectrogram
     """
     if isinstance(audio, str):
+        # File paths are decoded through ffmpeg; in-memory arrays are assumed to already
+        # be mono 16 kHz waveforms.
         audio = load_audio(audio)
     elif not isinstance(audio, mx.array):
         audio = mx.array(audio)
 
     if padding > 0:
+        # Transcription pads by one full chunk so the final real window can be sliced
+        # without special-casing short trailing audio.
         audio = mx.pad(audio, (0, padding))
     window = hanning(N_FFT)
     freqs = stft(audio, window, nperseg=N_FFT, noverlap=HOP_LENGTH)
@@ -168,6 +187,8 @@ def log_mel_spectrogram(
     mel_spec = magnitudes @ filters.T
 
     log_spec = mx.maximum(mel_spec, 1e-10).log10()
+    # Match Whisper preprocessing: clamp dynamic range to 8 dB below the peak and map
+    # values into the approximate range expected by the model.
     log_spec = mx.maximum(log_spec, log_spec.max() - 8.0)
     log_spec = (log_spec + 4.0) / 4.0
     return log_spec

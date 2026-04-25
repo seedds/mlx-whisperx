@@ -1,5 +1,7 @@
 # Copyright © 2023 Apple Inc.
 
+"""MLX implementation of the Whisper encoder-decoder network."""
+
 import base64
 import gzip
 import math
@@ -16,6 +18,8 @@ from .decoding import detect_language as detect_language_function
 
 @dataclass
 class ModelDimensions:
+    """Shape metadata loaded from a converted Whisper checkpoint config."""
+
     n_mels: int
     n_audio_ctx: int
     n_audio_state: int
@@ -29,7 +33,7 @@ class ModelDimensions:
 
 
 def sinusoids(length, channels, max_timescale=10000):
-    """Returns sinusoids for positional embedding"""
+    """Returns fixed sinusoidal positional embeddings for the audio encoder."""
     assert channels % 2 == 0
     log_timescale_increment = math.log(max_timescale) / (channels // 2 - 1)
     inv_timescales = mx.exp(-log_timescale_increment * mx.arange(channels // 2))
@@ -38,6 +42,8 @@ def sinusoids(length, channels, max_timescale=10000):
 
 
 class MultiHeadAttention(nn.Module):
+    """Multi-head attention block with optional key/value caching."""
+
     def __init__(self, n_state: int, n_head: int):
         super().__init__()
         self.n_head = n_head
@@ -53,15 +59,25 @@ class MultiHeadAttention(nn.Module):
         mask=None,
         kv_cache=None,
     ):
+        """Run self-attention or cross-attention.
+
+        `xa=None` selects decoder self-attention. Supplying `xa` selects
+        encoder-decoder cross-attention. `kv_cache` stores previous key/value tensors
+        during autoregressive decoding so each new token does not recompute history.
+        """
         q = self.query(x)
 
         if xa is None:
+            # Self-attention projects keys/values from the current text states and
+            # appends cached history when decoding token-by-token.
             k = self.key(x)
             v = self.value(x)
             if kv_cache is not None:
                 k = mx.concatenate([kv_cache[0], k], axis=1)
                 v = mx.concatenate([kv_cache[1], v], axis=1)
         elif kv_cache is None:
+            # Cross-attention keys/values come from encoded audio and can be reused for
+            # every decoder step.
             k = self.key(xa)
             v = self.value(xa)
         else:
@@ -71,7 +87,10 @@ class MultiHeadAttention(nn.Module):
         return self.out(wv), (k, v), qk
 
     def qkv_attention(self, q, k, v, mask=None):
+        """Compute scaled dot-product attention and return attention logits too."""
         n_batch, n_ctx, n_state = q.shape
+        # Split channels into heads. The -0.25 scaling on both q and k is equivalent to
+        # the usual sqrt(head_dim) scaling but improves numeric stability.
         scale = (n_state // self.n_head) ** -0.25
         q = q.reshape(*q.shape[:2], self.n_head, -1).transpose(0, 2, 1, 3) * scale
         k = k.reshape(*k.shape[:2], self.n_head, -1).transpose(0, 2, 3, 1) * scale
@@ -79,6 +98,7 @@ class MultiHeadAttention(nn.Module):
 
         qk = q @ k
         if mask is not None:
+            # The causal mask prevents decoder self-attention from seeing future tokens.
             qk = qk + mask[:n_ctx, :n_ctx]
 
         w = mx.softmax(qk, axis=-1, precise=True)
@@ -88,6 +108,8 @@ class MultiHeadAttention(nn.Module):
 
 
 class ResidualAttentionBlock(nn.Module):
+    """Transformer residual block used by both encoder and decoder."""
+
     def __init__(self, n_state: int, n_head: int, cross_attention: bool = False):
         super().__init__()
 
@@ -105,6 +127,7 @@ class ResidualAttentionBlock(nn.Module):
         self.mlp_ln = nn.LayerNorm(n_state)
 
     def __call__(self, x, xa=None, mask=None, kv_cache=None):
+        """Apply self-attention, optional cross-attention, and the MLP branch."""
         kv, cross_kv = kv_cache if kv_cache else (None, None)
         y, kv, _ = self.attn(self.attn_ln(x), mask=mask, kv_cache=kv)
         x += y
@@ -119,6 +142,8 @@ class ResidualAttentionBlock(nn.Module):
 
 
 class AudioEncoder(nn.Module):
+    """Convert log-Mel spectrogram windows into encoded audio features."""
+
     def __init__(
         self,
         n_mels: int,
@@ -137,8 +162,10 @@ class AudioEncoder(nn.Module):
         self.ln_post = nn.LayerNorm(n_state)
 
     def __call__(self, x):
+        """Encode a batch of Mel spectrograms shaped `(batch, frames, n_mels)`."""
         x = nn.gelu(self.conv1(x))
         x = nn.gelu(self.conv2(x))
+        # The second convolution halves time resolution, matching `n_audio_ctx`.
         assert x.shape[1:] == self._positional_embedding.shape, "incorrect audio shape"
         x = x + self._positional_embedding
 
@@ -150,6 +177,8 @@ class AudioEncoder(nn.Module):
 
 
 class TextDecoder(nn.Module):
+    """Autoregressive text decoder conditioned on encoded audio features."""
+
     def __init__(
         self,
         n_vocab: int,
@@ -181,12 +210,14 @@ class TextDecoder(nn.Module):
             the encoded audio features to be attended on
         """
         offset = kv_cache[0][0][0].shape[1] if kv_cache else 0
+        # When decoding incrementally, positions begin after the cached sequence length.
         x = (
             self.token_embedding(x)
             + self.positional_embedding[offset : offset + x.shape[-1]]
         )
 
         if kv_cache is None:
+            # Keep one self-attention and one cross-attention cache per decoder block.
             kv_cache = [None] * len(self.blocks)
         cross_qk = [None] * len(self.blocks)
         for e, block in enumerate(self.blocks):
@@ -199,6 +230,8 @@ class TextDecoder(nn.Module):
 
 
 class Whisper(nn.Module):
+    """Complete Whisper model with MLX encoder, decoder, and decode helpers."""
+
     def __init__(self, dims: ModelDimensions, dtype: mx.Dtype = mx.float16):
         super().__init__()
         self.dims = dims
@@ -227,6 +260,7 @@ class Whisper(nn.Module):
         self.alignment_heads = mx.array(np.asarray(all_heads.nonzero()).T)
 
     def set_alignment_heads(self, dump: Union[bytes, np.ndarray]):
+        """Configure decoder attention heads used for word timestamp alignment."""
         if isinstance(dump, np.ndarray):
             self.alignment_heads = mx.array(dump)
         elif isinstance(dump, bytes):
@@ -242,24 +276,30 @@ class Whisper(nn.Module):
             )
 
     def embed_audio(self, mel):
+        """Encode Mel spectrogram input without running the text decoder."""
         return self.encoder(mel)
 
     def logits(self, tokens, audio_features):
+        """Return decoder logits for token sequences conditioned on audio features."""
         return self.decoder(tokens, audio_features)[0]
 
     def forward_with_cross_qk(self, mel, tokens):
+        """Return logits and cross-attention scores used by timestamp alignment."""
         logits, _, cross_qk = self.decoder(tokens, self.encoder(mel))
         return logits, cross_qk
 
     def __call__(self, mel, tokens):
+        """Run encoder and decoder in one call."""
         return self.decoder(tokens, self.encoder(mel))[0]
 
     @property
     def is_multilingual(self):
+        """Whether the vocabulary contains Whisper language tokens."""
         return self.dims.n_vocab >= 51865
 
     @property
     def num_languages(self):
+        """Number of language tokens available in this checkpoint."""
         return self.dims.n_vocab - 51765 - int(self.is_multilingual)
 
     detect_language = detect_language_function

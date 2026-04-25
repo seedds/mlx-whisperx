@@ -1,3 +1,10 @@
+"""Forced-alignment helpers for converting ASR segments into word timestamps.
+
+The MLX Whisper backend can produce text segments, but WhisperX-style output needs
+word-level timings. This module loads a CTC model, scores transcript characters
+against the audio, then backtracks through a trellis to assign timestamps to words.
+"""
+
 from dataclasses import dataclass
 import re
 from typing import Iterable, Optional
@@ -85,12 +92,14 @@ DEFAULT_ALIGN_MODELS_HF = {
 
 
 def interpolate_nans(values: pd.Series, method: str = "nearest") -> pd.Series:
+    """Fill missing timestamp values while preserving known alignment points."""
     if values.notnull().sum() > 1:
         return values.interpolate(method=method).ffill().bfill()
     return values.ffill().bfill()
 
 
 def _sentence_spans(text: str, language: str) -> list[tuple[int, int]]:
+    """Return character spans for sentence-like chunks inside an ASR segment."""
     try:
         from nltk.data import load as nltk_load
 
@@ -105,6 +114,8 @@ def _sentence_spans(text: str, language: str) -> list[tuple[int, int]]:
         spans = list(splitter.span_tokenize(text))
         return spans or [(0, len(text))]
     except Exception:
+        # Fall back to a punctuation regex if NLTK data is unavailable or unsupported
+        # for the requested language.
         spans: list[tuple[int, int]] = []
         start = 0
         for match in re.finditer(r"[^.!?。！？]+[.!?。！？]?", text):
@@ -122,6 +133,12 @@ def load_align_model(
     model_dir: Optional[str] = None,
     model_cache_only: bool = False,
 ):
+    """Load the default or requested CTC model used for forced alignment.
+
+    Torchaudio bundles are preferred when the language has a known built-in model;
+    otherwise Hugging Face Wav2Vec2 CTC models are loaded. The returned metadata tells
+    `align` how to map transcript characters into CTC token IDs.
+    """
     try:
         import torchaudio
         from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
@@ -132,6 +149,8 @@ def load_align_model(
         ) from exc
 
     if model_name is None:
+        # Match WhisperX defaults: use compact torchaudio bundles where available and
+        # language-specific Hugging Face checkpoints for broader language coverage.
         if language_code in DEFAULT_ALIGN_MODELS_TORCH:
             model_name = DEFAULT_ALIGN_MODELS_TORCH[language_code]
         elif language_code in DEFAULT_ALIGN_MODELS_HF:
@@ -166,6 +185,7 @@ def load_align_model(
                 "or torchaudio. Check the model name or cache settings."
             ) from exc
         pipeline_type = "huggingface"
+        # Hugging Face vocabularies map characters/subwords to integer CTC classes.
         align_dictionary = {
             char.lower(): code for char, code in processor.tokenizer.get_vocab().items()
         }
@@ -189,12 +209,20 @@ def align(
     combined_progress: bool = False,
     progress_callback=None,
 ) -> dict:
+    """Align transcript segments to audio and return WhisperX-style segments.
+
+    The algorithm normalizes each transcript into alignable characters, runs the CTC
+    model over the corresponding audio span, computes a trellis of blank/token scores,
+    backtracks the best path, and aggregates character timings into words and sentence
+    subsegments.
+    """
     try:
         import torch
     except Exception as exc:
         raise RuntimeError("PyTorch is required for alignment, or pass no_align=True.") from exc
 
     if not torch.is_tensor(audio):
+        # Accept either a path, NumPy waveform, or Torch tensor to match the public API.
         if isinstance(audio, str):
             audio = load_audio(audio)
         audio = torch.from_numpy(audio)
@@ -225,6 +253,8 @@ def align(
         for cdx, char in enumerate(text):
             char_ = char.lower()
             if model_lang not in LANGUAGES_WITHOUT_SPACES:
+                # Most CTC vocabularies use `|` as the word separator instead of a
+                # literal space. Languages without spaces are aligned character-wise.
                 char_ = char_.replace(" ", "|")
 
             if cdx < num_leading or cdx > len(text) - num_trailing - 1:
@@ -233,6 +263,8 @@ def align(
                 clean_char.append(char_)
                 clean_cdx.append(cdx)
             elif char_ not in {" ", "|"}:
+                # Unknown non-space characters are retained and later mapped to a
+                # wildcard CTC column so punctuation does not collapse nearby timing.
                 clean_char.append(char_)
                 clean_cdx.append(cdx)
 
@@ -270,6 +302,8 @@ def align(
         f2 = int(t2 * SAMPLE_RATE)
         waveform_segment = audio[:, f1:f2]
         if waveform_segment.shape[-1] < 400:
+            # Very short spans can fail inside convolutional frontends; pad to a safe
+            # minimum while keeping `lengths` so torchaudio still knows true length.
             lengths = torch.as_tensor([waveform_segment.shape[-1]]).to(device)
             waveform_segment = torch.nn.functional.pad(
                 waveform_segment,
@@ -295,6 +329,8 @@ def align(
 
         has_wildcard = any(char not in model_dictionary for char in text_clean)
         if has_wildcard:
+            # For characters missing from the CTC dictionary, add a synthetic wildcard
+            # class scored as the best non-blank class at each frame.
             non_blank_mask = torch.ones(emission.size(1), dtype=torch.bool)
             non_blank_mask[blank_id] = False
             wildcard_col = emission[:, non_blank_mask].max(dim=1).values
@@ -313,6 +349,7 @@ def align(
 
         char_segments = merge_repeats(path, text_clean)
         duration = t2 - t1
+        # Convert trellis frame indices back to seconds in the original audio span.
         ratio = duration * waveform_segment.size(0) / (trellis.size(0) - 1)
 
         char_segments_arr = []
@@ -345,6 +382,8 @@ def align(
         char_segments_df["sentence-idx"] = None
 
         for sdx2, (sstart, send) in enumerate(segment_data[sdx]["sentence_spans"]):
+            # Build smaller subtitle-friendly subsegments while preserving the original
+            # text ordering and word timings.
             sentence_mask = (char_segments_df.index >= sstart) & (char_segments_df.index <= send)
             curr_chars = char_segments_df.loc[sentence_mask]
             char_segments_df.loc[sentence_mask, "sentence-idx"] = sdx2
@@ -376,6 +415,8 @@ def align(
                 starts = pd.Series([word.get("start", np.nan) for word in sentence_words])
                 ends = pd.Series([word.get("end", np.nan) for word in sentence_words])
                 if starts.isna().any() and starts.notna().any():
+                    # Missing timings usually come from punctuation or unsupported
+                    # characters. Interpolation keeps the word list complete.
                     starts = interpolate_nans(starts, method=interpolate_method)
                     ends = interpolate_nans(ends, method=interpolate_method)
                     for idx, word in enumerate(sentence_words):
@@ -402,6 +443,7 @@ def align(
             aligned_subsegments.append(subsegment)
 
         aligned_subsegments_df = pd.DataFrame(aligned_subsegments)
+        # Group adjacent sentence chunks that interpolate to identical boundaries.
         aligned_subsegments_df["start"] = interpolate_nans(
             aligned_subsegments_df["start"],
             method=interpolate_method,
@@ -430,6 +472,7 @@ def align(
 
 
 def get_trellis(emission, tokens, blank_id=0):
+    """Build the CTC dynamic-programming table for transcript token alignment."""
     import torch
 
     num_frame = emission.size(0)
@@ -441,6 +484,8 @@ def get_trellis(emission, tokens, blank_id=0):
     trellis[-num_tokens:, 0] = float("inf")
 
     for t in range(num_frame):
+        # At each frame, either stay on the current token by emitting blank, or advance
+        # to the next transcript token by emitting that token.
         trellis[t + 1, 1:] = torch.maximum(
             trellis[t, 1:] + emission[t, blank_id],
             trellis[t, :-1] + emission[t, tokens],
@@ -450,12 +495,15 @@ def get_trellis(emission, tokens, blank_id=0):
 
 @dataclass
 class Point:
+    """Single CTC path point linking a transcript token to an emission frame."""
+
     token_index: int
     time_index: int
     score: float
 
 
 def backtrack(trellis, emission, tokens, blank_id=0):
+    """Recover the best CTC path from the completed trellis."""
     import torch
 
     j = trellis.size(1) - 1
@@ -464,6 +512,7 @@ def backtrack(trellis, emission, tokens, blank_id=0):
     for t in range(t_start, 0, -1):
         stayed = trellis[t - 1, j] + emission[t - 1, blank_id]
         changed = trellis[t - 1, j - 1] + emission[t - 1, tokens[j - 1]]
+        # Record the frame score used by the winning transition for later averaging.
         prob = emission[t - 1, tokens[j - 1] if changed > stayed else blank_id].exp().item()
         path.append(Point(j - 1, t - 1, prob))
         if changed > stayed:
@@ -477,6 +526,8 @@ def backtrack(trellis, emission, tokens, blank_id=0):
 
 @dataclass
 class Segment:
+    """Merged repeated CTC token span with an average confidence score."""
+
     label: str
     start: int
     end: int
@@ -488,6 +539,7 @@ class Segment:
 
 
 def merge_repeats(path, transcript):
+    """Collapse repeated CTC path points into character-level spans."""
     i1, i2 = 0, 0
     segments = []
     while i1 < len(path):

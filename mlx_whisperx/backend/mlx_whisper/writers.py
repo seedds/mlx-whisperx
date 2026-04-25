@@ -1,5 +1,7 @@
 # Copyright © 2024 Apple Inc.
 
+"""Output writers bundled with the vendored MLX Whisper backend."""
+
 import json
 import pathlib
 import re
@@ -9,6 +11,7 @@ from typing import Callable, List, Optional, TextIO
 def format_timestamp(
     seconds: float, always_include_hours: bool = False, decimal_marker: str = "."
 ):
+    """Format seconds as a VTT/SRT timestamp."""
     assert seconds >= 0, "non-negative timestamp expected"
     milliseconds = round(seconds * 1000.0)
 
@@ -28,6 +31,7 @@ def format_timestamp(
 
 
 def get_start(segments: List[dict]) -> Optional[float]:
+    """Return the first known word start, falling back to segment start."""
     return next(
         (w["start"] for s in segments for w in s["words"]),
         segments[0]["start"] if segments else None,
@@ -35,6 +39,8 @@ def get_start(segments: List[dict]) -> Optional[float]:
 
 
 class ResultWriter:
+    """Base writer that handles file path construction."""
+
     extension: str
 
     def __init__(self, output_dir: str):
@@ -57,6 +63,8 @@ class ResultWriter:
 
 
 class WriteTXT(ResultWriter):
+    """Write plain transcript text, one segment per line."""
+
     extension: str = "txt"
 
     def write_result(
@@ -67,6 +75,8 @@ class WriteTXT(ResultWriter):
 
 
 class SubtitlesWriter(ResultWriter):
+    """Shared cue-building logic for VTT and SRT writers."""
+
     always_include_hours: bool
     decimal_marker: str
 
@@ -80,6 +90,7 @@ class SubtitlesWriter(ResultWriter):
         highlight_words: bool = False,
         max_words_per_line: Optional[int] = None,
     ):
+        """Yield `(start, end, text)` cue tuples from transcript results."""
         options = options or {}
         max_line_width = max_line_width or options.get("max_line_width")
         max_line_count = max_line_count or options.get("max_line_count")
@@ -90,6 +101,7 @@ class SubtitlesWriter(ResultWriter):
         max_words_per_line = max_words_per_line or 1000
 
         def iterate_subtitles():
+            """Group word timings into cue-sized chunks."""
             line_len = 0
             line_count = 1
             # the next subtitle to yield (a list of word timings with whitespace)
@@ -101,6 +113,7 @@ class SubtitlesWriter(ResultWriter):
                 while chunk_index < len(segment["words"]):
                     remaining_words = len(segment["words"]) - chunk_index
                     if max_words_per_line > len(segment["words"]) - chunk_index:
+                        # Use a shorter final chunk rather than indexing past the word list.
                         words_count = remaining_words
                     for i, original_timing in enumerate(
                         segment["words"][chunk_index : chunk_index + words_count]
@@ -149,6 +162,8 @@ class SubtitlesWriter(ResultWriter):
                 subtitle_end = self.format_timestamp(subtitle[-1]["end"])
                 subtitle_text = "".join([word["word"] for word in subtitle])
                 if highlight_words:
+                    # Emit one cue per active word, underlining the active token while
+                    # keeping the rest of the cue text visible.
                     last = subtitle_start
                     all_words = [timing["word"] for timing in subtitle]
                     for i, this_word in enumerate(subtitle):
@@ -171,6 +186,7 @@ class SubtitlesWriter(ResultWriter):
                 else:
                     yield subtitle_start, subtitle_end, subtitle_text
         else:
+            # Without word timings, fall back to segment-level cues.
             for segment in result["segments"]:
                 segment_start = self.format_timestamp(segment["start"])
                 segment_end = self.format_timestamp(segment["end"])
@@ -178,6 +194,7 @@ class SubtitlesWriter(ResultWriter):
                 yield segment_start, segment_end, segment_text
 
     def format_timestamp(self, seconds: float):
+        """Format seconds using concrete writer timestamp rules."""
         return format_timestamp(
             seconds=seconds,
             always_include_hours=self.always_include_hours,
@@ -186,6 +203,8 @@ class SubtitlesWriter(ResultWriter):
 
 
 class WriteVTT(SubtitlesWriter):
+    """WebVTT writer."""
+
     extension: str = "vtt"
     always_include_hours: bool = False
     decimal_marker: str = "."
@@ -199,6 +218,8 @@ class WriteVTT(SubtitlesWriter):
 
 
 class WriteSRT(SubtitlesWriter):
+    """SubRip writer."""
+
     extension: str = "srt"
     always_include_hours: bool = True
     decimal_marker: str = ","
@@ -235,6 +256,8 @@ class WriteTSV(ResultWriter):
 
 
 class WriteJSON(ResultWriter):
+    """Serialize the full result dictionary as JSON."""
+
     extension: str = "json"
 
     def write_result(
@@ -246,6 +269,7 @@ class WriteJSON(ResultWriter):
 def get_writer(
     output_format: str, output_dir: str
 ) -> Callable[[dict, TextIO, dict], None]:
+    """Return the writer implementation for `output_format`."""
     writers = {
         "txt": WriteTXT,
         "vtt": WriteVTT,
@@ -260,6 +284,7 @@ def get_writer(
         def write_all(
             result: dict, file: TextIO, options: Optional[dict] = None, **kwargs
         ):
+            """Write every backend-supported output format."""
             for writer in all_writers:
                 writer(result, file, options, **kwargs)
 

@@ -1,5 +1,7 @@
 # Copyright © 2023 Apple Inc.
 
+"""Windowed Whisper transcription loop for the vendored MLX backend."""
+
 import sys
 import warnings
 from typing import List, Optional, Tuple, Union
@@ -24,6 +26,7 @@ from .tokenizer import LANGUAGES, get_tokenizer
 
 
 def _format_timestamp(seconds: float):
+    """Format seconds for human-readable verbose transcript output."""
     assert seconds >= 0, "non-negative timestamp expected"
     milliseconds = round(seconds * 1000.0)
 
@@ -41,6 +44,7 @@ def _format_timestamp(seconds: float):
 
 
 def _get_end(segments: List[dict]) -> Optional[float]:
+    """Return the latest known end time from word timings or segment timings."""
     return next(
         (w["end"] for s in reversed(segments) for w in reversed(s["words"])),
         segments[-1]["end"] if segments else None,
@@ -48,11 +52,14 @@ def _get_end(segments: List[dict]) -> Optional[float]:
 
 
 class ModelHolder:
+    """Process-local cache for the currently loaded MLX Whisper model."""
+
     model = None
     model_path = None
 
     @classmethod
     def get_model(cls, model_path: str, dtype: mx.Dtype):
+        """Load a model only when the path changes."""
         if cls.model is None or model_path != cls.model_path:
             cls.model = load_model(model_path, dtype=dtype)
             cls.model_path = model_path
@@ -149,6 +156,8 @@ def transcribe(
     # Pad 30-seconds of silence to the input audio, for slicing
     mel = log_mel_spectrogram(audio, n_mels=model.dims.n_mels, padding=N_SAMPLES)
     content_frames = mel.shape[-2] - N_FRAMES
+    # `content_duration` excludes the artificial padding so output timings stay tied to
+    # real audio length.
     content_duration = float(content_frames * HOP_LENGTH / SAMPLE_RATE)
 
     if verbose:
@@ -161,6 +170,8 @@ def transcribe(
             make_safe = lambda x: x
 
     if decode_options.get("language", None) is None:
+        # Language detection uses the first 30-second encoder window before the main
+        # seek loop. The detected code is then fixed for the full file.
         if not model.is_multilingual:
             decode_options["language"] = "en"
         else:
@@ -187,6 +198,8 @@ def transcribe(
     )
 
     if isinstance(clip_timestamps, str):
+        # Convert user-facing seconds into frame seek points. An odd number of endpoints
+        # means the final clip extends to the end of the audio.
         clip_timestamps = [
             float(ts) for ts in (clip_timestamps.split(",") if clip_timestamps else [])
         ]
@@ -205,6 +218,7 @@ def transcribe(
         warnings.warn("Word-level timestamps on translations may not be reliable.")
 
     def decode_with_fallback(segment: mx.array) -> DecodingResult:
+        """Decode one Mel window, trying fallback temperatures on failure heuristics."""
         temperatures = (
             [temperature] if isinstance(temperature, (int, float)) else temperature
         )
@@ -238,6 +252,8 @@ def transcribe(
                 no_speech_threshold is not None
                 and decode_result.no_speech_prob > no_speech_threshold
             ):
+                # Silence is a valid outcome, not a reason to retry with a hotter
+                # temperature that may hallucinate text.
                 needs_fallback = False  # silence
             if not needs_fallback:
                 break
@@ -263,6 +279,7 @@ def transcribe(
     def new_segment(
         *, start: float, end: float, tokens: mx.array, result: DecodingResult
     ):
+        """Build a transcript segment dictionary from decoded tokens."""
         tokens = tokens.tolist()
         text_tokens = [token for token in tokens if token < tokenizer.eot]
         return {
@@ -284,6 +301,8 @@ def transcribe(
         last_speech_timestamp = 0.0
         for seek_clip_start, seek_clip_end in seek_clips:
             while seek < seek_clip_end:
+                # `seek` is measured in Mel frames. Convert it to seconds only when
+                # creating user-visible timestamps.
                 time_offset = float(seek * HOP_LENGTH / SAMPLE_RATE)
                 window_end_time = float((seek + N_FRAMES) * HOP_LENGTH / SAMPLE_RATE)
                 segment_size = min(
@@ -309,6 +328,8 @@ def transcribe(
                         should_skip = False
 
                     if should_skip:
+                        # A silent window can be skipped wholesale because there are no
+                        # timestamp tokens to recover inside it.
                         seek += (
                             segment_size  # fast-forward to the next segment boundary
                         )
@@ -319,6 +340,7 @@ def transcribe(
 
                 # anomalous words are very long/short/improbable
                 def word_anomaly_score(word: dict) -> float:
+                    """Score words that look like timestamp-alignment hallucinations."""
                     probability = word.get("probability", 0.0)
                     duration = word["end"] - word["start"]
                     score = 0.0
@@ -331,6 +353,7 @@ def transcribe(
                     return score
 
                 def is_segment_anomaly(segment: Optional[dict]) -> bool:
+                    """Return True for segments dominated by anomalous word timings."""
                     if segment is None or not segment["words"]:
                         return False
                     words = [
@@ -341,6 +364,7 @@ def transcribe(
                     return score >= 3 or score + 0.01 >= len(words)
 
                 def next_words_segment(segments: List[dict]) -> Optional[dict]:
+                    """Return the next segment that has word timings."""
                     return next((s for s in segments if s["words"]), None)
 
                 timestamp_tokens = tokens >= tokenizer.timestamp_begin
@@ -361,6 +385,9 @@ def transcribe(
 
                     last_slice = 0
                     for current_slice in slices:
+                        # Consecutive timestamp tokens delimit complete subsegments. The
+                        # start/end timestamp tokens are retained in `sliced_tokens` but
+                        # filtered out when decoding text.
                         sliced_tokens = tokens[last_slice:current_slice]
                         start_timestamp_pos = (
                             sliced_tokens[0].item() - tokenizer.timestamp_begin
@@ -412,6 +439,8 @@ def transcribe(
                     seek += segment_size
 
                 if word_timestamps:
+                    # Word timestamps are computed from cross-attention and can refine
+                    # both segment boundaries and the next seek position.
                     add_word_timestamps(
                         segments=current_segments,
                         model=model,
@@ -426,6 +455,8 @@ def transcribe(
                     if not single_timestamp_ending:
                         last_word_end = _get_end(current_segments)
                         if last_word_end is not None and last_word_end > time_offset:
+                            # Continue from the last aligned word instead of the fixed
+                            # window boundary to avoid repeating audio.
                             seek = round(last_word_end * FRAMES_PER_SECOND)
 
                     # skip silence before possible hallucinations

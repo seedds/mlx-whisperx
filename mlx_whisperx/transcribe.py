@@ -1,3 +1,5 @@
+"""Public Python API for running the complete transcription pipeline."""
+
 from typing import Optional, Sequence
 
 import numpy as np
@@ -48,6 +50,12 @@ def transcribe(
     verbose: bool = False,
     print_progress: bool = False,
 ) -> dict:
+    """Transcribe audio and optionally run alignment and diarization.
+
+    The signature mirrors the CLI option names so users can move settings between
+    shell commands and Python with minimal translation. Internally, the arguments are
+    packed into `PipelineOptions` and executed by `MLXWhisperXPipeline`.
+    """
     kwargs = locals().copy()
     audio_obj = kwargs.pop("audio")
     options = PipelineOptions(**kwargs)

@@ -1,5 +1,7 @@
 # Copyright © 2023 Apple Inc.
 
+"""Tokenizer utilities matching OpenAI Whisper's multilingual token layout."""
+
 import base64
 import os
 import string
@@ -9,6 +11,8 @@ from typing import Dict, List, Optional, Tuple
 
 import tiktoken
 
+# Whisper's multilingual vocabulary reserves one special token per language code in
+# this exact order. The order is therefore data, not presentation.
 LANGUAGES = {
     "en": "english",
     "zh": "chinese",
@@ -132,7 +136,11 @@ TO_LANGUAGE_CODE = {
 
 @dataclass
 class Tokenizer:
-    """A thin wrapper around `tiktoken` providing quick access to special tokens"""
+    """A thin wrapper around `tiktoken` providing quick access to special tokens.
+
+    The wrapper knows how Whisper arranges start-of-transcript, language, task, and
+    timestamp tokens around the base BPE vocabulary.
+    """
 
     encoding: tiktoken.Encoding
     num_languages: int
@@ -142,6 +150,7 @@ class Tokenizer:
     special_tokens: Dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self):
+        """Cache special token IDs and build the start-of-transcript sequence."""
         for special in self.encoding.special_tokens_set:
             special_token = self.encoding.encode_single_token(special)
             self.special_tokens[special] = special_token
@@ -153,6 +162,8 @@ class Tokenizer:
         langs = tuple(LANGUAGES.keys())[: self.num_languages]
         sot_sequence = [sot]
         if self.language is not None:
+            # Language tokens immediately follow <|startoftranscript|> in Whisper's
+            # special-token block.
             sot_sequence.append(sot + 1 + langs.index(self.language))
         if self.task is not None:
             task_token: int = transcribe if self.task == "transcribe" else translate
@@ -161,9 +172,11 @@ class Tokenizer:
         self.sot_sequence = tuple(sot_sequence)
 
     def encode(self, text, **kwargs):
+        """Encode text with the underlying tiktoken encoding."""
         return self.encoding.encode(text, **kwargs)
 
     def decode(self, token_ids: List[int], **kwargs) -> str:
+        """Decode text tokens while dropping timestamp tokens."""
         token_ids = [t for t in token_ids if t < self.timestamp_begin]
         return self.encoding.decode(token_ids, **kwargs)
 
@@ -226,6 +239,7 @@ class Tokenizer:
 
     @cached_property
     def all_language_tokens(self) -> Tuple[int]:
+        """Return all language token IDs supported by this model variant."""
         result = []
         for token, token_id in self.special_tokens.items():
             if token.strip("<|>") in LANGUAGES:
@@ -234,10 +248,12 @@ class Tokenizer:
 
     @cached_property
     def all_language_codes(self) -> Tuple[str]:
+        """Return language codes corresponding to `all_language_tokens`."""
         return tuple(self.decode([_l]).strip("<|>") for _l in self.all_language_tokens)
 
     @cached_property
     def sot_sequence_including_notimestamps(self) -> Tuple[int]:
+        """Return the SOT sequence with `<|notimestamps|>` appended."""
         return tuple(list(self.sot_sequence) + [self.no_timestamps])
 
     @cached_property
@@ -277,6 +293,7 @@ class Tokenizer:
         return tuple(sorted(result))
 
     def split_to_word_tokens(self, tokens: List[int]):
+        """Split text token IDs into display words and their source token groups."""
         if self.language in {"zh", "ja", "th", "lo", "my", "yue"}:
             # These languages don't typically use spaces, so it is difficult to split words
             # without morpheme analysis. Here, we instead split words at any
@@ -286,6 +303,7 @@ class Tokenizer:
         return self.split_tokens_on_spaces(tokens)
 
     def split_tokens_on_unicode(self, tokens: List[int]):
+        """Split tokens whenever the accumulated byte sequence becomes valid Unicode."""
         decoded_full = self.decode_with_timestamps(tokens)
         replacement_char = "\ufffd"
 
@@ -311,6 +329,7 @@ class Tokenizer:
         return words, word_tokens
 
     def split_tokens_on_spaces(self, tokens: List[int]):
+        """Split token groups on leading spaces while keeping punctuation attached."""
         subwords, subword_tokens_list = self.split_tokens_on_unicode(tokens)
         words = []
         word_tokens = []
@@ -331,6 +350,7 @@ class Tokenizer:
 
 @lru_cache(maxsize=None)
 def get_encoding(name: str = "gpt2", num_languages: int = 99):
+    """Load a bundled `.tiktoken` vocabulary and append Whisper special tokens."""
     vocab_path = os.path.join(os.path.dirname(__file__), "assets", f"{name}.tiktoken")
     with open(vocab_path) as fid:
         ranks = {
@@ -354,6 +374,7 @@ def get_encoding(name: str = "gpt2", num_languages: int = 99):
     ]
 
     for token in specials:
+        # Special tokens are appended after the base BPE ranks in Whisper order.
         special_tokens[token] = n_vocab
         n_vocab += 1
 
@@ -374,7 +395,9 @@ def get_tokenizer(
     language: Optional[str] = None,
     task: Optional[str] = None,  # Literal["transcribe", "translate", None]
 ) -> Tokenizer:
+    """Return a cached tokenizer configured for model type, language, and task."""
     if language is not None:
+        # Accept both two-letter codes and common English language names/aliases.
         language = language.lower()
         if language not in LANGUAGES:
             if language in TO_LANGUAGE_CODE:
@@ -383,10 +406,12 @@ def get_tokenizer(
                 raise ValueError(f"Unsupported language: {language}")
 
     if multilingual:
+        # Multilingual models always expect language and task tokens in the prompt.
         encoding_name = "multilingual"
         language = language or "en"
         task = task or "transcribe"
     else:
+        # English-only models use the GPT-2 vocabulary and no language/task tokens.
         encoding_name = "gpt2"
         language = None
         task = None

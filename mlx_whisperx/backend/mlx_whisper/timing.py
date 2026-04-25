@@ -1,5 +1,7 @@
 # Copyright © 2023 Apple Inc.
 
+"""Word timestamp estimation using Whisper cross-attention patterns."""
+
 import itertools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List
@@ -46,6 +48,7 @@ def median_filter(x: np.ndarray, filter_width: int):
 
 @numba.jit(nopython=True)
 def backtrace(trace: np.ndarray):
+    """Recover a dynamic-time-warping path from a completed trace matrix."""
     i = trace.shape[0] - 1
     j = trace.shape[1] - 1
     trace[0, :] = 2
@@ -71,6 +74,7 @@ def backtrace(trace: np.ndarray):
 
 @numba.jit(nopython=True, parallel=True)
 def dtw_cpu(x: np.ndarray):
+    """Numba-accelerated dynamic time warping over a cost matrix."""
     N, M = x.shape
     cost = np.ones((N + 1, M + 1), dtype=np.float32) * np.inf
     trace = -np.ones((N + 1, M + 1), dtype=np.float32)
@@ -96,12 +100,18 @@ def dtw_cpu(x: np.ndarray):
 
 
 def dtw(x: np.ndarray) -> np.ndarray:
+    """Dispatch DTW computation.
+
+    This backend currently uses the CPU implementation even when MLX is available.
+    """
     # todo: more efficient version in mlx
     return dtw_cpu(x)
 
 
 @dataclass
 class WordTiming:
+    """Word timing estimated from token probabilities and attention alignment."""
+
     word: str
     tokens: List[int]
     start: float
@@ -119,6 +129,7 @@ def find_alignment(
     medfilt_width: int = 7,
     qk_scale: float = 1.0,
 ) -> List[WordTiming]:
+    """Align generated text tokens to Mel frames using cross-attention weights."""
     if len(text_tokens) == 0:
         return []
 
@@ -154,6 +165,8 @@ def find_alignment(
 
     matrix = weights.mean(axis=0)
     matrix = matrix[len(tokenizer.sot_sequence) : -1]
+    # DTW expects a cost matrix, so negate attention weights: high attention should be
+    # cheap to traverse.
     text_indices, time_indices = dtw(-matrix)
 
     words, word_tokens = tokenizer.split_to_word_tokens(text_tokens + [tokenizer.eot])
@@ -167,6 +180,7 @@ def find_alignment(
     word_boundaries = np.pad(np.cumsum([len(t) for t in word_tokens[:-1]]), (1, 0))
 
     jumps = np.pad(np.diff(text_indices), (1, 0), constant_values=1).astype(bool)
+    # Each jump in token index marks the frame where a new text token begins.
     jump_times = time_indices[jumps] / TOKENS_PER_SECOND
     start_times = jump_times[word_boundaries[:-1]]
     end_times = jump_times[word_boundaries[1:]]
@@ -184,6 +198,7 @@ def find_alignment(
 
 
 def merge_punctuations(alignment: List[WordTiming], prepended: str, appended: str):
+    """Attach standalone punctuation tokens to neighboring word timings."""
     # merge prepended punctuations
     i = len(alignment) - 2
     j = len(alignment) - 1
@@ -229,6 +244,7 @@ def add_word_timestamps(
     last_speech_timestamp: float,
     **kwargs,
 ):
+    """Add word timing dictionaries to segment dictionaries in place."""
     if len(segments) == 0:
         return
 
@@ -263,6 +279,8 @@ def add_word_timestamps(
     word_index = 0
 
     for segment, text_tokens in zip(segments, text_tokens_per_segment):
+        # Consume the global word alignment in segment order until the segment's token
+        # budget is exhausted.
         saved_tokens = 0
         words = []
 
@@ -298,6 +316,8 @@ def add_word_timestamps(
                     len(words) > 1
                     and words[1]["end"] - words[1]["start"] > max_duration
                 ):
+                    # Split the first two words near the boundary when both look too
+                    # long after a silence gap.
                     boundary = max(words[1]["end"] / 2, words[1]["end"] - max_duration)
                     words[0]["end"] = words[1]["start"] = boundary
                 words[0]["start"] = max(0, words[0]["end"] - max_duration)

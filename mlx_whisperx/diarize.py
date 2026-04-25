@@ -1,3 +1,5 @@
+"""Speaker diarization integration and speaker-label assignment utilities."""
+
 from typing import Optional, Union
 
 import numpy as np
@@ -7,7 +9,10 @@ from .audio import SAMPLE_RATE, audio_to_numpy
 
 
 class DiarizationPipeline:
+    """Thin wrapper around pyannote's speaker diarization pipeline."""
+
     def __init__(self, model_name=None, token=None, device="cpu", cache_dir=None):
+        """Load the requested pyannote diarization model on the requested device."""
         try:
             import torch
             from pyannote.audio import Pipeline
@@ -31,6 +36,12 @@ class DiarizationPipeline:
         return_embeddings: bool = False,
         progress_callback=None,
     ):
+        """Run diarization and return a DataFrame of speaker intervals.
+
+        The pyannote pipeline accepts an in-memory waveform dictionary. Returning a
+        plain pandas DataFrame keeps the downstream speaker assignment independent from
+        pyannote-specific classes.
+        """
         audio_np = audio_to_numpy(audio)
         audio_data = {
             "waveform": self._torch.from_numpy(audio_np[None, :]),
@@ -51,6 +62,8 @@ class DiarizationPipeline:
         diarize_df["end"] = diarize_df["segment"].apply(lambda segment: segment.end)
 
         if return_embeddings:
+            # Some pyannote pipelines expose per-speaker embeddings. Preserve them only
+            # when available so callers can opt into the larger JSON payload.
             embeddings = getattr(output, "speaker_embeddings", None)
             if embeddings is None:
                 return diarize_df, None
@@ -63,6 +76,13 @@ class DiarizationPipeline:
 
 
 class IntervalTree:
+    """Small interval index optimized for assigning diarization labels.
+
+    This is not a general tree; intervals are sorted by start time and queried with
+    NumPy masks. For transcript-sized diarization outputs this is simpler and fast
+    enough while avoiding an extra dependency.
+    """
+
     def __init__(self, intervals: list[tuple[float, float, str]]):
         if not intervals:
             self.starts = np.array([])
@@ -75,12 +95,15 @@ class IntervalTree:
         self.speakers = [item[2] for item in sorted_intervals]
 
     def query(self, start: float, end: float) -> list[tuple[str, float]]:
+        """Return speakers overlapping `[start, end)` with overlap durations."""
         if len(self.starts) == 0:
             return []
         right_idx = np.searchsorted(self.starts, end, side="left")
         if right_idx == 0:
             return []
         candidates = slice(0, right_idx)
+        # Only intervals that start before `end` can overlap. The second predicate
+        # removes candidates that already ended before `start`.
         overlaps = (self.starts[candidates] < end) & (self.ends[candidates] > start)
         results = []
         for idx in np.where(overlaps)[0]:
@@ -90,6 +113,7 @@ class IntervalTree:
         return results
 
     def find_nearest(self, time: float) -> Optional[str]:
+        """Return the speaker whose interval midpoint is closest to `time`."""
         if len(self.starts) == 0:
             return None
         mids = (self.starts + self.ends) / 2
@@ -97,6 +121,7 @@ class IntervalTree:
 
 
 def _dominant_speaker(overlaps: list[tuple[str, float]]) -> Optional[str]:
+    """Choose the speaker with the largest total overlap duration."""
     if not overlaps:
         return None
     intersections: dict[str, float] = {}
@@ -111,6 +136,12 @@ def assign_word_speakers(
     speaker_embeddings: Optional[dict[str, list[float]]] = None,
     fill_nearest: bool = False,
 ) -> dict:
+    """Attach speaker labels to transcript segments and words.
+
+    Segment-level labels use the dominant diarization speaker over the segment span.
+    Word-level labels use each word's aligned time span, giving better results around
+    speaker changes when word timestamps are available.
+    """
     segments = transcript_result.get("segments", [])
     if not segments or diarize_df is None or len(diarize_df) == 0:
         return transcript_result
@@ -129,6 +160,7 @@ def assign_word_speakers(
 
         for word in segment.get("words", []):
             if "start" not in word:
+                # Unaligned words cannot be placed on the diarization timeline.
                 continue
             word_start = word["start"]
             word_end = word.get("end", word_start)

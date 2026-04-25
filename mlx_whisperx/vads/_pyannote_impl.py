@@ -1,3 +1,5 @@
+"""Pyannote voice activity detection backend implementation."""
+
 from .vad import Segment, Vad
 
 
@@ -5,7 +7,10 @@ DEFAULT_PYANNOTE_VAD_MODEL = "pyannote/segmentation-3.0"
 
 
 class Pyannote(Vad):
+    """Pyannote segmentation pipeline adapted to the shared VAD interface."""
+
     def __init__(self, device, token=None, model_name=None, cache_dir=None, **kwargs):
+        """Load and configure pyannote voice activity detection."""
         super().__init__(kwargs["vad_onset"])
         try:
             import torch
@@ -48,15 +53,18 @@ class Pyannote(Vad):
         self.vad_pipeline = pipeline
 
     def __call__(self, audio: dict, **kwargs):
+        """Run pyannote VAD and return pyannote's timeline/score object."""
         return self.vad_pipeline(audio)
 
     @staticmethod
     def preprocess_audio(audio):
+        """Convert the project-standard NumPy waveform into pyannote's tensor shape."""
         import torch
 
         return torch.from_numpy(audio).unsqueeze(0)
 
     def merge_chunks(self, segments, chunk_size: int, onset: float = 0.5, offset=None):
+        """Binarize pyannote scores if necessary, then use shared chunk merging."""
         segments_list = []
         # pyannote returns scores; binarize using pyannote's native pipeline output API.
         if hasattr(segments, "get_timeline"):
@@ -76,6 +84,8 @@ class Pyannote(Vad):
 
 
 class _Binarize:
+    """Minimal pyannote score binarizer used when raw segmentation scores are returned."""
+
     def __init__(self, annotation_cls, segment_cls, onset=0.5, offset=None, max_duration=float("inf")):
         self.annotation_cls = annotation_cls
         self.segment_cls = segment_cls
@@ -84,6 +94,7 @@ class _Binarize:
         self.max_duration = max_duration
 
     def __call__(self, scores):
+        """Convert frame-level speech probabilities into active speech intervals."""
         import numpy as np
 
         active = self.annotation_cls()
@@ -98,6 +109,8 @@ class _Binarize:
             for t, score in zip(timestamps[1:], label_scores[1:]):
                 if is_active:
                     if t - start > self.max_duration:
+                        # Split overlong regions at the lowest-confidence point after
+                        # the midpoint to keep ASR chunks bounded without arbitrary cuts.
                         search_after = len(curr_scores) // 2
                         split_idx = search_after + np.argmin(curr_scores[search_after:])
                         split_t = curr_timestamps[split_idx]

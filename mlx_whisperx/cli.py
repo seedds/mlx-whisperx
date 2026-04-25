@@ -1,3 +1,5 @@
+"""Command-line interface for the top-level mlx-whisperx pipeline."""
+
 import argparse
 import os
 import pathlib
@@ -12,14 +14,17 @@ from .writers import get_writer
 
 
 def optional_int(value: str):
+    """Parse integer CLI values while accepting the string `None`."""
     return None if value == "None" else int(value)
 
 
 def optional_float(value: str):
+    """Parse float CLI values while accepting the string `None`."""
     return None if value == "None" else float(value)
 
 
 def str2bool(value: str) -> bool:
+    """Parse explicit string booleans used by upstream-compatible CLI flags."""
     values = {"True": True, "False": False, "true": True, "false": False}
     if value not in values:
         raise ValueError(f"Expected one of {set(values)}, got {value}")
@@ -27,6 +32,7 @@ def str2bool(value: str) -> bool:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser without executing any model-loading code."""
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("audio", nargs="+", type=str, help="Audio file(s) to transcribe")
     parser.add_argument("--model", default="mlx-community/whisper-turbo", help="mlx-whisper model directory or Hugging Face repo")
@@ -89,6 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Parse CLI arguments, run transcription for each input, and write outputs."""
     parser = build_parser()
     args = vars(parser.parse_args())
 
@@ -103,6 +110,8 @@ def main() -> None:
     writer = get_writer(output_format, output_dir)
 
     writer_args = {
+        # Writer-only options are removed before calling `transcribe` so the public API
+        # does not need to know about subtitle formatting.
         "highlight_words": args.pop("highlight_words"),
         "max_line_count": args.pop("max_line_count"),
         "max_line_width": args.pop("max_line_width"),
@@ -113,16 +122,22 @@ def main() -> None:
 
     compute_type = args.pop("compute_type")
     if compute_type == "float16":
+        # The vendored backend exposes `fp16`; this CLI presents a friendlier
+        # `compute_type` option while preserving the lower-level flag.
         args["fp16"] = True
     elif compute_type == "float32":
         args["fp16"] = False
 
     increment = args.pop("temperature_increment_on_fallback")
     if increment is not None:
+        # Match Whisper's fallback behavior by trying a temperature ladder when the
+        # backend reports repetition or low-confidence failures.
         args["temperature"] = tuple(np.arange(args["temperature"], 1.0 + 1e-6, increment))
 
     audio_files = args.pop("audio")
     for audio_path in audio_files:
+        # Continue processing later files after a per-file failure; batch CLI usage is
+        # more useful when one bad file does not abort the entire run.
         name = output_name or pathlib.Path(audio_path).stem
         try:
             result = transcribe(audio_path, **args)

@@ -1,3 +1,5 @@
+"""Silero voice activity detection backend."""
+
 import os
 from pathlib import Path
 from typing import Optional
@@ -12,6 +14,7 @@ SILERO_VAD_REMOTE_REPO = "snakers4/silero-vad:master"
 
 
 def _silero_cache_candidates() -> list[Path]:
+    """Return local paths that may contain a Silero Torch Hub checkout."""
     candidates: list[Path] = []
     env_path = os.environ.get(SILERO_VAD_ENV_PATH)
     if env_path:
@@ -28,6 +31,12 @@ def _silero_cache_candidates() -> list[Path]:
 
 
 def _load_silero_from_cache():
+    """Load Silero from a local checkout when possible.
+
+    Prefer local cache to avoid network access during normal CLI runs. If an explicit
+    environment path is configured, failures are surfaced because the user asked for
+    that exact checkout.
+    """
     last_error = None
     for path in _silero_cache_candidates():
         if not (path / "hubconf.py").exists():
@@ -53,7 +62,10 @@ def _load_silero_from_cache():
 
 
 class Silero(Vad):
+    """Silero-backed VAD adapter with the same interface as pyannote VAD."""
+
     def __init__(self, **kwargs):
+        """Load Silero from local cache or Torch Hub."""
         super().__init__(kwargs["vad_onset"])
         self.vad_onset = kwargs["vad_onset"]
         self.chunk_size = kwargs["chunk_size"]
@@ -70,6 +82,7 @@ class Silero(Vad):
         self.get_speech_timestamps = vad_utils[0]
 
     def __call__(self, audio: dict, **kwargs):
+        """Return speech intervals in seconds for a 16 kHz waveform."""
         sample_rate = audio["sample_rate"]
         if sample_rate != 16000:
             raise ValueError("Only 16000 Hz sample rate is supported")
@@ -87,8 +100,10 @@ class Silero(Vad):
 
     @staticmethod
     def preprocess_audio(audio):
+        """Silero accepts the project-standard NumPy waveform directly."""
         return audio
 
     @staticmethod
     def merge_chunks(segments, chunk_size: int, onset: float = 0.5, offset: Optional[float] = None):
+        """Delegate chunk merging to the shared VAD base implementation."""
         return Vad.merge_chunks(segments, chunk_size, onset, offset)

@@ -1,3 +1,5 @@
+"""Output writers for WhisperX-style transcript results."""
+
 import json
 import pathlib
 import re
@@ -8,6 +10,7 @@ LANGUAGES_WITHOUT_SPACES = {"ja", "zh"}
 
 
 def format_timestamp(seconds: float, always_include_hours: bool = False, decimal_marker: str = ".") -> str:
+    """Format seconds as an SRT/VTT-compatible timestamp."""
     seconds = max(0.0, seconds)
     milliseconds = round(seconds * 1000.0)
     hours = milliseconds // 3_600_000
@@ -21,12 +24,15 @@ def format_timestamp(seconds: float, always_include_hours: bool = False, decimal
 
 
 class ResultWriter:
+    """Base class for file writers selected by `get_writer`."""
+
     extension: str
 
     def __init__(self, output_dir: str):
         self.output_dir = output_dir
 
     def __call__(self, result: dict, output_name: str, options: Optional[dict] = None):
+        """Open the target output path and delegate serialization."""
         output_path = (pathlib.Path(self.output_dir) / output_name).with_suffix(f".{self.extension}")
         with output_path.open("w", encoding="utf-8") as file:
             self.write_result(result, file=file, options=options or {})
@@ -36,6 +42,8 @@ class ResultWriter:
 
 
 class WriteTXT(ResultWriter):
+    """Plain-text writer that emits one transcript segment per line."""
+
     extension = "txt"
 
     def write_result(self, result: dict, file: TextIO, options: dict):
@@ -48,6 +56,8 @@ class WriteTXT(ResultWriter):
 
 
 class WriteJSON(ResultWriter):
+    """JSON writer preserving the normalized pipeline result shape."""
+
     extension = "json"
 
     def write_result(self, result: dict, file: TextIO, options: dict):
@@ -55,10 +65,14 @@ class WriteJSON(ResultWriter):
 
 
 class WriteAUD(WriteJSON):
+    """Audacity-style JSON alias used by this package's output format list."""
+
     extension = "aud"
 
 
 class WriteTSV(ResultWriter):
+    """Tab-separated writer with millisecond start/end columns."""
+
     extension = "tsv"
 
     def write_result(self, result: dict, file: TextIO, options: dict):
@@ -71,24 +85,30 @@ class WriteTSV(ResultWriter):
 
 
 class SubtitlesWriter(ResultWriter):
+    """Shared line-breaking and highlighting logic for SRT and VTT output."""
+
     always_include_hours: bool
     decimal_marker: str
 
     def format_timestamp(self, seconds: float) -> str:
+        """Format a timestamp using the concrete subtitle format's conventions."""
         return format_timestamp(seconds, self.always_include_hours, self.decimal_marker)
 
     def _segment_text(self, segment: dict) -> str:
+        """Return subtitle-safe segment text, including speaker prefix when present."""
         text = segment.get("text", "").strip().replace("-->", "->")
         speaker = segment.get("speaker")
         return f"[{speaker}]: {text}" if speaker else text
 
     @staticmethod
     def _join_words(words: list[str], language: Optional[str]) -> str:
+        """Join aligned words while respecting languages that do not use spaces."""
         if language in LANGUAGES_WITHOUT_SPACES:
             return "".join(words)
         return " ".join(words).replace(" \n", "\n").replace("\n ", "\n")
 
     def iterate_result(self, result: dict, options: dict):
+        """Yield `(start, end, text)` subtitle cues from a normalized result."""
         segments = result.get("segments", [])
         if not segments:
             return
@@ -102,6 +122,7 @@ class SubtitlesWriter(ResultWriter):
         language = result.get("language")
 
         def iterate_subtitles():
+            """Group word timings into subtitle-sized cues."""
             line_len = 0
             line_count = 1
             word_count = 0
@@ -119,6 +140,8 @@ class SubtitlesWriter(ResultWriter):
 
                     long_pause = not preserve_segments
                     if "start" in timing:
+                        # When explicit line limits are set, a long pause forces a cue
+                        # break so subtitles do not span silence.
                         long_pause = long_pause and float(timing["start"]) - last > 3.0
                     else:
                         long_pause = False
@@ -139,6 +162,8 @@ class SubtitlesWriter(ResultWriter):
                             )
                             or seg_break
                         ):
+                            # Start a new cue when line limits, segment boundaries, or
+                            # long pauses say the current subtitle is complete.
                             yield subtitle, times
                             subtitle = []
                             times = []
@@ -165,6 +190,8 @@ class SubtitlesWriter(ResultWriter):
                 yield subtitle, times
 
         if any(segment.get("words") for segment in segments):
+            # Prefer word timings when alignment is available; this gives more accurate
+            # subtitle cue boundaries and enables per-word highlighting.
             for subtitle, times in iterate_subtitles():
                 speaker = times[0][2]
                 prefix = f"[{speaker}]: " if speaker is not None else ""
@@ -183,6 +210,8 @@ class SubtitlesWriter(ResultWriter):
                 has_timing = bool(word_starts and word_ends)
 
                 if highlight_words and has_timing:
+                    # Emit multiple cues over the same text, underlining one active word
+                    # at a time. This is the common karaoke-style SRT/VTT convention.
                     last = subtitle_start
                     for word_idx, word in enumerate(subtitle):
                         if "start" not in word or "end" not in word:
@@ -202,6 +231,7 @@ class SubtitlesWriter(ResultWriter):
             return
 
         for segment in segments:
+            # Fallback for unaligned output: segment timings only, no word wrapping.
             yield (
                 self.format_timestamp(segment.get("start", 0.0)),
                 self.format_timestamp(segment.get("end", 0.0)),
@@ -210,6 +240,8 @@ class SubtitlesWriter(ResultWriter):
 
 
 class WriteVTT(SubtitlesWriter):
+    """WebVTT writer."""
+
     extension = "vtt"
     always_include_hours = False
     decimal_marker = "."
@@ -221,6 +253,8 @@ class WriteVTT(SubtitlesWriter):
 
 
 class WriteSRT(SubtitlesWriter):
+    """SubRip subtitle writer."""
+
     extension = "srt"
     always_include_hours = True
     decimal_marker = ","
@@ -231,6 +265,7 @@ class WriteSRT(SubtitlesWriter):
 
 
 def get_writer(output_format: str, output_dir: str) -> Callable[[dict, str, Optional[dict]], None]:
+    """Return a writer callable for a single format or for all formats."""
     writers = {
         "txt": WriteTXT,
         "vtt": WriteVTT,
@@ -243,6 +278,7 @@ def get_writer(output_format: str, output_dir: str) -> Callable[[dict, str, Opti
         selected = [writer(output_dir) for writer in writers.values()]
 
         def write_all(result: dict, output_name: str, options: Optional[dict] = None):
+            """Write every unique extension exactly once."""
             seen: set[str] = set()
             for writer in selected:
                 if writer.extension in seen:

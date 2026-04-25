@@ -1,3 +1,5 @@
+"""TypedDict definitions documenting the WhisperX-style JSON result shape."""
+
 from typing import Callable, List, Optional, TypedDict
 
 
@@ -11,6 +13,12 @@ except ImportError:  # pragma: no cover
 
 
 class SingleWordSegment(TypedDict):
+    """Word-level alignment result.
+
+    `start`, `end`, and `score` are absent when alignment could not confidently map
+    a word to audio. `speaker` is only present after diarization.
+    """
+
     word: str
     start: NotRequired[float]
     end: NotRequired[float]
@@ -19,6 +27,8 @@ class SingleWordSegment(TypedDict):
 
 
 class SingleCharSegment(TypedDict):
+    """Optional character-level alignment returned when requested by the caller."""
+
     char: str
     start: NotRequired[float]
     end: NotRequired[float]
@@ -26,6 +36,8 @@ class SingleCharSegment(TypedDict):
 
 
 class SingleSegment(TypedDict):
+    """Transcript segment with optional word, character, and speaker metadata."""
+
     start: float
     end: float
     text: str
@@ -36,6 +48,8 @@ class SingleSegment(TypedDict):
 
 
 class TranscriptionResult(TypedDict):
+    """Top-level result emitted by the Python API and JSON writer."""
+
     segments: List[SingleSegment]
     language: str
     text: NotRequired[str]

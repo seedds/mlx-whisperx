@@ -1,5 +1,7 @@
 # Copyright © 2024 Apple Inc.
 
+"""Standalone CLI for the vendored MLX Whisper backend."""
+
 import argparse
 import os
 import pathlib
@@ -13,13 +15,17 @@ from .writers import get_writer
 
 
 def build_parser():
+    """Build the backend CLI argument parser."""
     def optional_int(string):
+        """Parse integer values while accepting `None`."""
         return None if string == "None" else int(string)
 
     def optional_float(string):
+        """Parse float values while accepting `None`."""
         return None if string == "None" else float(string)
 
     def str2bool(string):
+        """Parse explicit boolean strings used by the upstream CLI."""
         str2val = {"True": True, "False": False}
         if string in str2val:
             return str2val[string]
@@ -203,6 +209,7 @@ def build_parser():
 
 
 def main():
+    """Run backend transcription for one or more input files."""
     parser = build_parser()
     args = vars(parser.parse_args())
     if args["verbose"] is True:
@@ -223,6 +230,8 @@ def main():
     ]
     writer_args = {arg: args.pop(arg) for arg in word_options}
     if not args["word_timestamps"]:
+        # Writer options that depend on words are invalid unless the backend is asked
+        # to calculate word timestamps.
         for k, v in writer_args.items():
             if v:
                 argop = k.replace("_", "-")

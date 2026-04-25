@@ -1,5 +1,12 @@
 # Copyright © 2023 Apple Inc.
 
+"""Autoregressive decoding machinery for the vendored MLX Whisper backend.
+
+The decoder turns encoded 30-second audio windows into token sequences. It supports
+greedy/sampling decoding, beam search, token suppression, timestamp-token rules,
+language detection, and final candidate ranking.
+"""
+
 import zlib
 from dataclasses import dataclass, field, replace
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
@@ -13,6 +20,7 @@ from .tokenizer import Tokenizer, get_tokenizer
 
 
 def compression_ratio(text) -> float:
+    """Return gzip compression ratio used as a repetition heuristic."""
     text_bytes = text.encode("utf-8")
     return len(text_bytes) / len(zlib.compress(text_bytes))
 
@@ -81,6 +89,8 @@ def detect_language(
 
 @dataclass(frozen=True)
 class DecodingOptions:
+    """Options controlling a single decode task over one or more audio windows."""
+
     # whether to perform X->X "transcribe" or X->English "translate"
     task: str = "transcribe"
 
@@ -118,6 +128,8 @@ class DecodingOptions:
 
 @dataclass(frozen=True)
 class DecodingResult:
+    """Result for one decoded audio window."""
+
     audio_features: mx.array
     language: str
     language_probs: Optional[Dict[str, float]] = None
@@ -130,6 +142,8 @@ class DecodingResult:
 
 
 class Inference:
+    """Stateful decoder forward-pass wrapper with MLX key/value caching."""
+
     def __init__(self, model: "Whisper"):
         self.model: "Whisper" = model
         self.kv_cache = None
@@ -173,6 +187,7 @@ class MaximumLikelihoodRanker(SequenceRanker):
 
     def rank(self, tokens: List[List[List[int]]], sum_logprobs: List[List[float]]):
         def scores(logprobs, lengths):
+            """Normalize candidate log probabilities by sequence length."""
             result = []
             for logprob, length in zip(logprobs, lengths):
                 if self.length_penalty is None:
@@ -253,6 +268,8 @@ def categorical(logits, temp):
 
 
 class GreedyDecoder(TokenDecoder):
+    """Token decoder for greedy decoding or temperature sampling."""
+
     def __init__(self, temperature: float, eot: int):
         self.temperature = temperature
         self.eot = eot
@@ -260,6 +277,7 @@ class GreedyDecoder(TokenDecoder):
     def update(
         self, tokens: mx.array, logits: mx.array, sum_logprobs: mx.array
     ) -> Tuple[mx.array, bool, mx.array]:
+        """Append one sampled token to every active sequence."""
         if self.temperature == 0:
             next_tokens = logits.argmax(axis=-1)
         else:
@@ -271,6 +289,8 @@ class GreedyDecoder(TokenDecoder):
         sum_logprobs += current_logprobs * (tokens[:, -1] != self.eot)
 
         eot_mask = tokens[:, -1] == self.eot
+        # Once a sequence has reached EOT, keep appending EOT so tensor shapes remain
+        # rectangular without changing the completed sequence probability.
         next_tokens = next_tokens * (1 - eot_mask) + self.eot * eot_mask
         tokens = mx.concatenate([tokens, next_tokens[:, None]], axis=-1)
 
@@ -284,6 +304,8 @@ class GreedyDecoder(TokenDecoder):
 
 
 class BeamSearchDecoder(TokenDecoder):
+    """Beam-search decoder with optional patience-based extra candidates."""
+
     def __init__(
         self,
         beam_size: int,
@@ -299,11 +321,13 @@ class BeamSearchDecoder(TokenDecoder):
         self.finished_sequences: Optional[List[Dict[Tuple[int, ...], float]]] = None
 
     def reset(self):
+        """Clear completed beam candidates before decoding a new batch."""
         self.finished_sequences = None
 
     def update(
         self, tokens: mx.array, logits: mx.array, sum_logprobs: mx.array
     ) -> Tuple[mx.array, bool, mx.array]:
+        """Advance every beam by one token and keep the best active beams."""
         if tokens.shape[0] % self.beam_size != 0:
             raise ValueError(f"n_batch must be divisible by beam_size, got {tokens.shape[0]}")
 
@@ -322,6 +346,8 @@ class BeamSearchDecoder(TokenDecoder):
         candidate_count = min(self.beam_size + 1, logprobs_array.shape[-1])
 
         for audio_idx in range(n_audio):
+            # Collect candidate continuations for one audio item. Each active beam offers
+            # its top token continuations; finished beams are saved separately.
             scores: Dict[Tuple[int, ...], float] = {}
             sources: Dict[Tuple[int, ...], int] = {}
             start = audio_idx * self.beam_size
@@ -330,11 +356,13 @@ class BeamSearchDecoder(TokenDecoder):
             for beam_idx in range(start, end):
                 prefix = tuple(int(token) for token in tokens_list[beam_idx])
                 if prefix[-1] == self.eot:
+                    # Completed beams stay available but are not expanded further.
                     scores[prefix] = float(sum_logprobs_list[beam_idx])
                     sources[prefix] = beam_idx
                     continue
 
                 row = logprobs_array[beam_idx]
+                # `argpartition` avoids sorting the full vocabulary for every beam.
                 top_indices = np.argpartition(row, -candidate_count)[-candidate_count:]
                 top_indices = top_indices[np.argsort(row[top_indices])[::-1]]
                 for token_id in top_indices:
@@ -350,6 +378,8 @@ class BeamSearchDecoder(TokenDecoder):
             for sequence in sorted(scores, key=scores.get, reverse=True):
                 score = scores[sequence]
                 if sequence[-1] == self.eot:
+                    # Finished sequences count toward `max_candidates` but do not fill
+                    # active beam slots unless too few unfinished candidates remain.
                     self.finished_sequences[audio_idx][sequence] = score
                     fallback_finished.append((sequence, score))
                     continue
@@ -362,6 +392,8 @@ class BeamSearchDecoder(TokenDecoder):
                     break
 
             for sequence, score in fallback_finished:
+                # If all likely continuations ended, backfill active beams with finished
+                # sequences to maintain the fixed beam tensor shape.
                 if saved == self.beam_size:
                     break
                 next_tokens.append(sequence)
@@ -375,6 +407,8 @@ class BeamSearchDecoder(TokenDecoder):
                 )
 
         self.inference.rearrange_kv_cache(source_indices)
+        # Completion is patience-aware: e.g. patience=1.5 waits for 1.5x beam_size
+        # finished candidates before stopping.
         completed = all(
             len(finished) >= self.max_candidates for finished in self.finished_sequences
         )
@@ -386,6 +420,7 @@ class BeamSearchDecoder(TokenDecoder):
         return mx.array(padded_tokens), mx.array(completed), mx.array(next_sum_logprobs)
 
     def finalize(self, tokens: mx.array, sum_logprobs: mx.array):
+        """Return padded finished candidate sequences and their scores."""
         tokens_list = tokens.tolist()
         sum_logprobs_list = np.array(sum_logprobs).tolist()
         n_audio = len(tokens_list)
@@ -393,6 +428,7 @@ class BeamSearchDecoder(TokenDecoder):
         all_tokens: List[List[Tuple[int, ...]]] = []
         all_scores: List[List[float]] = []
         for audio_idx in range(n_audio):
+            # Merge explicitly finished sequences with still-active beams forced to EOT.
             candidates: Dict[Tuple[int, ...], float] = {}
             if self.finished_sequences is not None:
                 candidates.update(self.finished_sequences[audio_idx])
@@ -443,6 +479,8 @@ class LogitFilter:
 
 
 class SuppressBlank(LogitFilter):
+    """Suppress initial blank/space outputs at the first sampled position."""
+
     def __init__(self, tokenizer: Tokenizer, sample_begin: int, n_vocab: int):
         self.sample_begin = sample_begin
         mask = np.zeros(n_vocab, np.float32)
@@ -456,6 +494,8 @@ class SuppressBlank(LogitFilter):
 
 
 class SuppressTokens(LogitFilter):
+    """Apply a fixed negative-infinity mask to disallowed token IDs."""
+
     def __init__(self, suppress_tokens: Sequence[int], n_vocab: int):
         mask = np.zeros(n_vocab, np.float32)
         mask[list(suppress_tokens)] = -np.inf
@@ -466,6 +506,8 @@ class SuppressTokens(LogitFilter):
 
 
 class ApplyTimestampRules(LogitFilter):
+    """Enforce Whisper timestamp-token constraints during decoding."""
+
     def __init__(
         self,
         tokenizer: Tokenizer,
@@ -477,12 +519,13 @@ class ApplyTimestampRules(LogitFilter):
         self.max_initial_timestamp_index = max_initial_timestamp_index
 
     def apply(self, logits: mx.array, tokens: mx.array) -> mx.array:
+        """Mask logits so timestamps are monotonic and properly paired."""
         mask = np.zeros(logits.shape, np.float32)
         # suppress <|notimestamps|> which is handled by without_timestamps
         if self.tokenizer.no_timestamps is not None:
             mask[:, self.tokenizer.no_timestamps] = -np.inf
 
-        ## timestamps have to appear in pairs, except directly before EOT; mask logits accordingly
+        # Timestamps have to appear in pairs, except directly before EOT; mask logits accordingly.
         tokens = tokens.tolist()
         for k in range(len(tokens)):
             seq = tokens[k][self.sample_begin :]
@@ -539,12 +582,15 @@ class ApplyTimestampRules(LogitFilter):
 
 
 class DecodingTask:
+    """Bundle all state needed to decode a batch of Mel windows."""
+
     inference: Inference
     sequence_ranker: SequenceRanker
     decoder: TokenDecoder
     logit_filters: List[LogitFilter]
 
     def __init__(self, model: "Whisper", options: DecodingOptions):
+        """Validate options, construct tokenizer, decoder, ranker, and filters."""
         self.model = model
 
         language = options.language or "en"
@@ -611,6 +657,7 @@ class DecodingTask:
             )
 
     def _verify_options(self, options: DecodingOptions) -> DecodingOptions:
+        """Reject incompatible option combinations before decode starts."""
         if options.beam_size is not None and options.best_of is not None:
             raise ValueError("beam_size and best_of can't be given together")
         if options.temperature == 0:
@@ -626,6 +673,7 @@ class DecodingTask:
         return options
 
     def _get_initial_tokens(self) -> Tuple[int]:
+        """Build the prompt prefix fed before generated tokens."""
         tokens = list(self.sot_sequence)
 
         if prefix := self.options.prefix:
@@ -635,6 +683,7 @@ class DecodingTask:
                 else prefix
             )
             if self.sample_len is not None:
+                # Leave room for generated tokens in the fixed text context window.
                 max_prefix_len = self.n_ctx // 2 - self.sample_len
                 prefix_tokens = prefix_tokens[-max_prefix_len:]
             tokens = tokens + prefix_tokens
@@ -646,6 +695,8 @@ class DecodingTask:
                 else prompt
             )
             tokens = (
+                # Previous context is marked with <|startofprev|> so the model treats it
+                # as history rather than text to emit for the current window.
                 [self.tokenizer.sot_prev]
                 + prompt_tokens[-(self.n_ctx // 2 - 1) :]
                 + tokens
@@ -654,12 +705,14 @@ class DecodingTask:
         return tuple(tokens)
 
     def _get_suppress_tokens(self) -> Tuple[int]:
+        """Expand user suppression settings into the final token mask list."""
         suppress_tokens = self.options.suppress_tokens
 
         if isinstance(suppress_tokens, str):
             suppress_tokens = [int(t) for t in suppress_tokens.split(",")]
 
         if -1 in suppress_tokens:
+            # `-1` is Whisper's shorthand for the built-in non-speech token set.
             suppress_tokens = [t for t in suppress_tokens if t >= 0]
             suppress_tokens.extend(self.tokenizer.non_speech_tokens)
         elif suppress_tokens is None or len(suppress_tokens) == 0:
@@ -668,6 +721,7 @@ class DecodingTask:
             assert isinstance(suppress_tokens, list), "suppress_tokens must be a list"
 
         suppress_tokens.extend(
+            # These control tokens should not be generated as transcript text.
             [
                 self.tokenizer.transcribe,
                 self.tokenizer.translate,
@@ -683,6 +737,7 @@ class DecodingTask:
         return tuple(sorted(set(suppress_tokens)))
 
     def _get_audio_features(self, mel: mx.array):
+        """Encode Mel input unless the caller already supplied encoded features."""
         if self.options.fp16:
             mel = mel.astype(mx.float16)
 
@@ -703,6 +758,7 @@ class DecodingTask:
         return audio_features
 
     def _detect_language(self, audio_features: mx.array, tokens: np.array):
+        """Detect language and optionally write the detected language token."""
         languages = [self.options.language] * audio_features.shape[0]
         lang_probs = None
 
@@ -718,10 +774,12 @@ class DecodingTask:
         return languages, lang_probs
 
     def _main_loop(self, audio_features: mx.array, tokens: mx.array):
+        """Autoregressively sample tokens until EOT or sample length is reached."""
         n_batch = tokens.shape[0]
         sum_logprobs = mx.zeros(n_batch)
 
         def _step(inputs, audio_features, tokens, sum_logprobs):
+            """Run one decoder step, filter logits, and append selected tokens."""
             pre_logits = self.inference.logits(inputs, audio_features)
 
             # consider the logits at the last token only
@@ -741,6 +799,8 @@ class DecodingTask:
             tokens, audio_features, tokens, sum_logprobs
         )
         if self.tokenizer.no_speech is not None:  # compute no_speech_probs
+            # The no-speech probability is read from the first decoder step at SOT and
+            # later used by transcription to skip silent windows.
             probs_at_sot = mx.softmax(pre_logits[:, self.sot_index], axis=-1)
             no_speech_probs = probs_at_sot[:, self.tokenizer.no_speech]
         else:
@@ -750,6 +810,7 @@ class DecodingTask:
         for i in range(1, self.sample_len):
             inputs = tokens[:, -1:]
             if tokens.shape[-1] > self.n_ctx:
+                # Guard against pathological generation exceeding the decoder context.
                 break
 
             next_tokens, next_completed, next_sum_logprobs, _ = _step(
@@ -765,6 +826,7 @@ class DecodingTask:
         return tokens, sum_logprobs, no_speech_probs
 
     def run(self, mel: mx.array) -> List[DecodingResult]:
+        """Decode a batch of Mel windows and return ranked results."""
         self.inference.reset()
         self.decoder.reset()
         tokenizer: Tokenizer = self.tokenizer
@@ -788,6 +850,8 @@ class DecodingTask:
 
         # repeat tokens by the group size, for beam search or best-of-n sampling
         if self.n_group > 1:
+            # Beam search and best-of sampling duplicate each audio item into a group of
+            # candidate sequences that share the same encoded audio features.
             tokens = tokens[:, None, :]
             tokens = mx.broadcast_to(
                 tokens, [n_audio, self.n_group, len(self.initial_tokens)]

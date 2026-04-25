@@ -1,5 +1,7 @@
 # Copyright © 2023 Apple Inc.
 
+"""PyTorch Whisper model definition retained for conversion/interoperability paths."""
+
 import base64
 import gzip
 from dataclasses import dataclass
@@ -13,6 +15,8 @@ from torch import Tensor, nn
 
 @dataclass
 class ModelDimensions:
+    """Shape metadata matching the MLX Whisper model config."""
+
     n_mels: int
     n_audio_ctx: int
     n_audio_state: int
@@ -26,11 +30,15 @@ class ModelDimensions:
 
 
 class LayerNorm(nn.LayerNorm):
+    """LayerNorm that computes in float32 and casts back to the input dtype."""
+
     def forward(self, x: Tensor) -> Tensor:
         return super().forward(x.float()).type(x.dtype)
 
 
 class Linear(nn.Linear):
+    """Linear layer that casts weights/biases to the input dtype at runtime."""
+
     def forward(self, x: Tensor) -> Tensor:
         return F.linear(
             x,
@@ -40,6 +48,8 @@ class Linear(nn.Linear):
 
 
 class Conv1d(nn.Conv1d):
+    """Conv1d layer that casts parameters to the input dtype at runtime."""
+
     def _conv_forward(
         self, x: Tensor, weight: Tensor, bias: Optional[Tensor]
     ) -> Tensor:
@@ -49,7 +59,7 @@ class Conv1d(nn.Conv1d):
 
 
 def sinusoids(length, channels, max_timescale=10000):
-    """Returns sinusoids for positional embedding"""
+    """Returns fixed sinusoidal positional embeddings for the audio encoder."""
     assert channels % 2 == 0
     log_timescale_increment = np.log(max_timescale) / (channels // 2 - 1)
     inv_timescales = torch.exp(-log_timescale_increment * torch.arange(channels // 2))
@@ -58,6 +68,8 @@ def sinusoids(length, channels, max_timescale=10000):
 
 
 class MultiHeadAttention(nn.Module):
+    """PyTorch attention implementation mirroring the MLX model."""
+
     def __init__(self, n_state: int, n_head: int):
         super().__init__()
         self.n_head = n_head
@@ -91,6 +103,7 @@ class MultiHeadAttention(nn.Module):
     def qkv_attention(
         self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None
     ):
+        """Compute scaled dot-product attention and return detached qk scores."""
         n_batch, n_ctx, n_state = q.shape
         scale = (n_state // self.n_head) ** -0.25
         q = q.view(*q.shape[:2], self.n_head, -1).permute(0, 2, 1, 3) * scale
@@ -107,6 +120,8 @@ class MultiHeadAttention(nn.Module):
 
 
 class ResidualAttentionBlock(nn.Module):
+    """Transformer residual block used by the PyTorch encoder and decoder."""
+
     def __init__(self, n_state: int, n_head: int, cross_attention: bool = False):
         super().__init__()
 
@@ -139,6 +154,8 @@ class ResidualAttentionBlock(nn.Module):
 
 
 class AudioEncoder(nn.Module):
+    """PyTorch audio encoder equivalent to the MLX encoder."""
+
     def __init__(
         self, n_mels: int, n_ctx: int, n_state: int, n_head: int, n_layer: int
     ):
@@ -159,6 +176,8 @@ class AudioEncoder(nn.Module):
         """
         x = F.gelu(self.conv1(x))
         x = F.gelu(self.conv2(x))
+        # PyTorch conv outputs channel-first tensors; Whisper transformer blocks use
+        # sequence-first hidden states.
         x = x.permute(0, 2, 1)
 
         assert x.shape[1:] == self.positional_embedding.shape, "incorrect audio shape"
@@ -172,6 +191,8 @@ class AudioEncoder(nn.Module):
 
 
 class TextDecoder(nn.Module):
+    """PyTorch autoregressive decoder conditioned on encoded audio."""
+
     def __init__(
         self, n_vocab: int, n_ctx: int, n_state: int, n_head: int, n_layer: int
     ):
@@ -199,6 +220,7 @@ class TextDecoder(nn.Module):
             the encoded audio features to be attended on
         """
         offset = next(iter(kv_cache.values())).shape[1] if kv_cache else 0
+        # Cached decoding starts positional embeddings after already-decoded tokens.
         x = (
             self.token_embedding(x)
             + self.positional_embedding[offset : offset + x.shape[-1]]
@@ -217,6 +239,8 @@ class TextDecoder(nn.Module):
 
 
 class Whisper(nn.Module):
+    """PyTorch Whisper model kept in sync with the MLX implementation."""
+
     def __init__(self, dims: ModelDimensions):
         super().__init__()
         self.dims = dims
@@ -243,6 +267,7 @@ class Whisper(nn.Module):
         self.register_buffer("alignment_heads", all_heads.to_sparse(), persistent=False)
 
     def set_alignment_heads(self, dump: bytes):
+        """Load base85/gzip-encoded alignment-head masks from a checkpoint."""
         array = np.frombuffer(
             gzip.decompress(base64.b85decode(dump)), dtype=bool
         ).copy()
@@ -252,26 +277,32 @@ class Whisper(nn.Module):
         self.register_buffer("alignment_heads", mask.to_sparse(), persistent=False)
 
     def embed_audio(self, mel: torch.Tensor):
+        """Encode Mel spectrogram input without running the decoder."""
         return self.encoder(mel)
 
     def logits(self, tokens: torch.Tensor, audio_features: torch.Tensor):
+        """Return decoder logits conditioned on encoded audio."""
         return self.decoder(tokens, audio_features)
 
     def forward(
         self, mel: torch.Tensor, tokens: torch.Tensor
     ) -> Dict[str, torch.Tensor]:
+        """Run encoder and decoder in one call."""
         return self.decoder(tokens, self.encoder(mel))
 
     @property
     def device(self):
+        """Return the device of the first parameter."""
         return next(self.parameters()).device
 
     @property
     def is_multilingual(self):
+        """Whether the vocabulary contains Whisper language tokens."""
         return self.dims.n_vocab >= 51865
 
     @property
     def num_languages(self):
+        """Number of language tokens available in this checkpoint."""
         return self.dims.n_vocab - 51765 - int(self.is_multilingual)
 
     def install_kv_cache_hooks(self, cache: Optional[dict] = None):
