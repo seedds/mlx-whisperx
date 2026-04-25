@@ -207,6 +207,12 @@ VAD options:
 - `--no_vad`: transcribe the full file as one chunk.
 - `--vad_dump_path`: write VAD chunks and settings to JSON.
 
+Silero VAD loads from the local Torch Hub cache first. To force a local Silero checkout, set:
+
+```bash
+export MLX_WHISPERX_SILERO_VAD_PATH=/path/to/snakers4_silero-vad
+```
+
 Alignment options:
 
 - `--no_align`: skip forced alignment.
