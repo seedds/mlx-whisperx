@@ -49,43 +49,154 @@ brew install ffmpeg
 
 Optional pyannote VAD and diarization use pyannote models and may require a Hugging Face token, depending on the selected model.
 
-## Quick Start
-
-Write every supported output format next to the input file:
+## Usage
 
 ```bash
-mlx-whisperx audio.wav --output_dir . --output_format all
+mlx-whisperx AUDIO [AUDIO ...] [OPTIONS]
 ```
 
-Write only JSON:
+By default, `mlx-whisperx`:
 
-```bash
-mlx-whisperx audio.wav --output_dir . --output_format json
-```
+- uses `mlx-community/whisper-turbo`
+- runs Silero VAD
+- performs forced alignment for word timestamps
+- writes outputs to the current directory
+- writes every supported output format when `--output_format` is not specified
 
-Use a specific `mlx-whisper` model and language:
+Common options:
+
+- `--model`: local model path or Hugging Face repo
+- `--language`: language code such as `en`, `ja`, or `fr`
+- `--task`: `transcribe` or `translate`
+- `--output_dir`: directory to write output files
+- `--output_name`: custom basename for output files
+- `--output_format`: `all`, `json`, `srt`, `vtt`, `txt`, `tsv`, or `aud`
+- `--no_align`: skip forced alignment
+- `--diarize`: attach speaker labels when diarization is enabled
+- `--hf_token`: Hugging Face token for gated pyannote models
+
+Example: output JSON
 
 ```bash
 mlx-whisperx audio.wav \
-  --model mlx-community/whisper-large-v3-turbo \
-  --language en \
+  --output_dir transcripts \
+  --output_name audio \
   --output_format json
 ```
 
-Generate subtitles:
+This writes `transcripts/audio.json`.
+
+Example JSON output:
+
+```json
+{
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 2.52,
+      "text": "Hello and welcome to mlx-whisperx.",
+      "words": [
+        {"word": "Hello", "start": 0.0, "end": 0.42, "score": 0.99},
+        {"word": "and", "start": 0.44, "end": 0.58, "score": 0.98},
+        {"word": "welcome", "start": 0.6, "end": 1.05, "score": 0.97},
+        {"word": "to", "start": 1.07, "end": 1.18, "score": 0.98},
+        {"word": "mlx-whisperx.", "start": 1.2, "end": 2.52, "score": 0.96}
+      ]
+    }
+  ],
+  "word_segments": [
+    {"word": "Hello", "start": 0.0, "end": 0.42, "score": 0.99},
+    {"word": "and", "start": 0.44, "end": 0.58, "score": 0.98}
+  ],
+  "language": "en"
+}
+```
+
+Example: output SRT
 
 ```bash
 mlx-whisperx audio.wav \
+  --output_dir subtitles \
+  --output_name audio \
   --output_format srt \
   --max_line_width 42 \
   --max_line_count 2
 ```
 
-Enable word highlighting in SRT/VTT:
+This writes `subtitles/audio.srt`.
+
+Example SRT output:
+
+```srt
+1
+00:00:00,000 --> 00:00:02,520
+Hello and welcome to
+mlx-whisperx.
+
+2
+00:00:02,700 --> 00:00:05,100
+This example shows subtitle
+output.
+```
+
+Complete example with optional parameters:
 
 ```bash
-mlx-whisperx audio.wav --output_format vtt --highlight_words True
+mlx-whisperx audio.wav \
+  --model mlx-community/whisper-large-v3-turbo \
+  --model_dir ./models \
+  --model_cache_only False \
+  --device cpu \
+  --compute_type float32 \
+  --output_dir ./out \
+  --output_name meeting \
+  --output_format all \
+  --verbose True \
+  --log-level info \
+  --task transcribe \
+  --language en \
+  --align_model jonatasgrosman/wav2vec2-large-xlsr-53-english \
+  --interpolate_method nearest \
+  --return_char_alignments \
+  --vad_method pyannote \
+  --vad_onset 0.5 \
+  --vad_offset 0.363 \
+  --vad_model pyannote/segmentation-3.0 \
+  --chunk_size 30 \
+  --vad_dump_path ./out/meeting.vad.json \
+  --diarize \
+  --min_speakers 2 \
+  --max_speakers 4 \
+  --diarize_model pyannote/speaker-diarization-community-1 \
+  --speaker_embeddings \
+  --hf_token YOUR_HF_TOKEN \
+  --temperature 0.0 \
+  --temperature_increment_on_fallback 0.2 \
+  --best_of 5 \
+  --beam_size 5 \
+  --patience 1.0 \
+  --length_penalty 1.0 \
+  --suppress_tokens -1 \
+  --suppress_numerals \
+  --initial_prompt "Technical meeting about MLX WhisperX." \
+  --hotwords "MLX, WhisperX, pyannote, diarization" \
+  --condition_on_previous_text True \
+  --compression_ratio_threshold 2.4 \
+  --logprob_threshold -1.0 \
+  --no_speech_threshold 0.6 \
+  --max_line_width 42 \
+  --max_line_count 2 \
+  --max_words_per_line 8 \
+  --highlight_words False \
+  --print_progress True
 ```
+
+Notes:
+
+- `--output_format all` writes `.txt`, `.vtt`, `.srt`, `.tsv`, `.json`, and `.aud`.
+- `--max_line_count` only has an effect when `--max_line_width` is also set.
+- `--highlight_words` applies to `srt` and `vtt`.
+- `--hf_token` is only needed for gated pyannote models.
 
 ## Python API
 
