@@ -39,6 +39,18 @@ cd mlx-whisperx
 python -m pip install -e .
 ```
 
+Install diarization support only when you need pyannote:
+
+```bash
+python -m pip install -e ".[diarize]"
+```
+
+Install everything this repository currently exposes:
+
+```bash
+python -m pip install -e ".[full]"
+```
+
 `ffmpeg` must be available on `PATH` because audio loading is handled through the ffmpeg CLI.
 
 On macOS with Homebrew:
@@ -246,6 +258,8 @@ result = transcribe(
 )
 ```
 
+`language` accepts either canonical codes such as `en` or case-insensitive names and aliases such as `English` or `Portuguese`.
+
 ## Output Schema
 
 JSON output follows the WhisperX-style shape:
@@ -280,12 +294,14 @@ When diarization is enabled, speaker labels are included where available:
 Basic options:
 
 - `--model`: `mlx-whisper` model directory or Hugging Face repo.
-- `--language`: language code. If omitted, language is auto-detected by ASR.
+- `--language`: language code or case-insensitive name/alias. If omitted, language is auto-detected by ASR.
 - `--task`: `transcribe` or `translate`.
 - `--output_format`: `all`, `srt`, `vtt`, `txt`, `tsv`, `json`, or `aud`.
 - `--output_dir`: directory for output files.
 - `--output_name`: custom output basename.
 - `--verbose`: print transcript and logs.
+
+English-only Whisper models such as `.en` checkpoints force `language=en` and do not support `--task translate`.
 
 Decoding options:
 
@@ -304,8 +320,8 @@ Precision and model-cache options:
 
 - `--compute_type float16`: force MLX ASR fp16. This is the default.
 - `--compute_type float32`: force MLX ASR fp32.
-- `--model_dir`: cache directory for alignment, pyannote VAD, and diarization models.
-- `--model_cache_only`: cached alignment models only. This does not affect ASR model downloads yet.
+- `--model_dir`: cache directory for ASR, alignment, pyannote VAD, and diarization models.
+- `--model_cache_only`: cached ASR, alignment, pyannote VAD, and diarization models only.
 
 VAD options:
 
@@ -316,6 +332,7 @@ VAD options:
 - `--vad_model`: Hugging Face pyannote segmentation model used with `--vad_method pyannote`. Defaults to `pyannote/segmentation-3.0`.
 - `--chunk_size`: merged VAD chunk size in seconds.
 - `--no_vad`: transcribe the full file as one chunk.
+- `--clip_timestamps`: comma-separated clip start/end pairs in seconds. Requires `--no_vad`.
 - `--vad_dump_path`: write VAD chunks and settings to JSON.
 
 Silero VAD loads from the local Torch Hub cache first. To force a local Silero checkout, set:
@@ -355,6 +372,15 @@ Inspect VAD chunks before ASR:
 mlx-whisperx audio.wav \
   --output_format json \
   --vad_dump_path audio.vad.json
+```
+
+Transcribe only selected clips without VAD chunking:
+
+```bash
+mlx-whisperx audio.wav \
+  --no_vad \
+  --clip_timestamps 0,15,30,45 \
+  --output_format json
 ```
 
 Run deterministic beam search explicitly:
@@ -417,8 +443,7 @@ mlx-whisperx first.wav second.wav third.wav --output_dir transcripts --output_fo
 - ASR decodes merged VAD chunks serially.
 - There is no `batch_size` CLI or API option.
 - `translate` skips forced alignment because alignment models are transcription-language specific.
-- `model_dir` applies to alignment, pyannote VAD, and diarization model loading, not ASR model downloads.
-- `model_cache_only` currently applies to cached alignment models only.
+- `clip_timestamps` is only supported with `--no_vad` because VAD chunking changes the timing base before ASR runs.
 - Pyannote VAD and diarization depend on a compatible PyTorch, torchaudio, pyannote installation, and Hugging Face model access when the selected model is gated.
 - The vendored ASR backend lives under `mlx_whisperx.backend.mlx_whisper` so decoder behavior can be changed without modifying external reference repositories.
 

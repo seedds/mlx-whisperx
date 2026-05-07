@@ -1,4 +1,4 @@
-"""TypedDict definitions documenting the WhisperX-style JSON result shape."""
+"""TypedDict definitions for the normalized top-level WhisperX-style JSON output."""
 
 from typing import Callable, List, Optional, TypedDict
 
@@ -36,19 +36,18 @@ class SingleCharSegment(TypedDict):
 
 
 class SingleSegment(TypedDict):
-    """Transcript segment with optional word, character, and speaker metadata."""
+    """Normalized transcript segment with optional word, character, and speaker metadata."""
 
     start: float
     end: float
     text: str
-    avg_logprob: NotRequired[float]
     speaker: NotRequired[str]
     words: NotRequired[List[SingleWordSegment]]
     chars: NotRequired[List[SingleCharSegment]]
 
 
 class TranscriptionResult(TypedDict):
-    """Top-level result emitted by the Python API and JSON writer."""
+    """Top-level normalized result emitted by the Python API and JSON writer."""
 
     segments: List[SingleSegment]
     language: str

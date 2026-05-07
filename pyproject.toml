@@ -17,9 +17,19 @@ dependencies = [
     "torch",
     "torchaudio",
     "transformers",
-    "pyannote-audio",
     "nltk",
     "tqdm",
+]
+
+[project.optional-dependencies]
+diarize = [
+    "pyannote-audio",
+]
+full = [
+    "pyannote-audio",
+]
+dev = [
+    "pytest",
 ]
 
 [project.scripts]

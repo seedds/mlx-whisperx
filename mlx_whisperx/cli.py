@@ -8,6 +8,7 @@ import warnings
 
 import numpy as np
 
+from ._language import LANGUAGE_OPTION_HELP, normalize_language_settings, parse_language
 from .log_utils import setup_logging
 from .transcribe import transcribe
 from .writers import get_writer
@@ -36,8 +37,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("audio", nargs="+", type=str, help="Audio file(s) to transcribe")
     parser.add_argument("--model", default="mlx-community/whisper-turbo", help="mlx-whisper model directory or Hugging Face repo")
-    parser.add_argument("--model_dir", default=None, help="Directory for alignment, pyannote VAD, and diarization model cache; ASR uses Hugging Face cache unless --model is a local path")
-    parser.add_argument("--model_cache_only", type=str2bool, default=False, help="Use cached alignment models only; does not affect ASR model downloads yet")
+    parser.add_argument("--model_dir", default=None, help="Directory for ASR, alignment, pyannote VAD, and diarization model cache")
+    parser.add_argument("--model_cache_only", type=str2bool, default=False, help="Use cached ASR, alignment, pyannote VAD, and diarization models only")
     parser.add_argument("--device", default="cpu", help="Torch device for VAD/alignment/diarization stages")
     parser.add_argument("--compute_type", default="float16", choices=["float16", "float32"], help="ASR precision: float16 is faster/lower memory, float32 is slower/higher precision")
 
@@ -48,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-level", default=None, choices=["debug", "info", "warning", "error", "critical"], help="Logging level")
 
     parser.add_argument("--task", default="transcribe", choices=["transcribe", "translate"], help="Speech recognition or translation")
-    parser.add_argument("--language", default=None, help="Language code. Defaults to auto-detect")
+    parser.add_argument("--language", type=parse_language, default=None, help=LANGUAGE_OPTION_HELP)
 
     parser.add_argument("--align_model", default=None, help="Alignment model name")
     parser.add_argument("--interpolate_method", default="nearest", choices=["nearest", "linear", "ignore"], help="Timestamp interpolation for unaligned words")
@@ -61,6 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vad_model", default=None, help="Hugging Face pyannote segmentation model used when --vad_method pyannote")
     parser.add_argument("--chunk_size", type=int, default=30, help="Merged VAD chunk size in seconds")
     parser.add_argument("--no_vad", action="store_true", help="Skip VAD and transcribe the full file as one chunk")
+    parser.add_argument("--clip_timestamps", default=None, help="Comma-separated start,end,start,end,... timestamps in seconds. Requires --no_vad.")
     parser.add_argument("--vad_dump_path", default=None, help="Write VAD chunks and settings to this JSON path")
 
     parser.add_argument("--diarize", action="store_true", help="Assign speaker labels")
@@ -119,6 +121,16 @@ def main() -> None:
     }
     if writer_args["max_line_count"] and not writer_args["max_line_width"]:
         warnings.warn("--max_line_count has no effect without --max_line_width")
+
+    if args.get("clip_timestamps") is not None and not args.get("no_vad"):
+        parser.error("--clip_timestamps requires --no_vad")
+
+    try:
+        args["language"], args["task"] = normalize_language_settings(
+            args["model"], args.get("language"), args.get("task")
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     compute_type = args.pop("compute_type")
     if compute_type == "float16":

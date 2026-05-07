@@ -20,9 +20,10 @@ from .audio import (
     pad_or_trim,
 )
 from .decoding import DecodingOptions, DecodingResult
+from .languages import LANGUAGES
 from .load_models import load_model
 from .timing import add_word_timestamps
-from .tokenizer import LANGUAGES, get_tokenizer
+from .tokenizer import get_tokenizer
 
 
 def _format_timestamp(seconds: float):
@@ -55,14 +56,26 @@ class ModelHolder:
     """Process-local cache for the currently loaded MLX Whisper model."""
 
     model = None
-    model_path = None
+    model_key = None
 
     @classmethod
-    def get_model(cls, model_path: str, dtype: mx.Dtype):
-        """Load a model only when the path changes."""
-        if cls.model is None or model_path != cls.model_path:
-            cls.model = load_model(model_path, dtype=dtype)
-            cls.model_path = model_path
+    def get_model(
+        cls,
+        model_path: str,
+        dtype: mx.Dtype,
+        model_dir: str | None = None,
+        model_cache_only: bool = False,
+    ):
+        """Load a model only when the effective load settings change."""
+        model_key = (model_path, dtype, model_dir, model_cache_only)
+        if cls.model is None or model_key != cls.model_key:
+            cls.model = load_model(
+                model_path,
+                dtype=dtype,
+                model_dir=model_dir,
+                model_cache_only=model_cache_only,
+            )
+            cls.model_key = model_key
         return cls.model
 
 
@@ -70,6 +83,8 @@ def transcribe(
     audio: Union[str, np.ndarray, mx.array],
     *,
     path_or_hf_repo: str = "mlx-community/whisper-tiny",
+    model_dir: Optional[str] = None,
+    model_cache_only: bool = False,
     verbose: Optional[bool] = None,
     temperature: Union[float, Tuple[float, ...]] = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
     compression_ratio_threshold: Optional[float] = 2.4,
@@ -151,7 +166,12 @@ def transcribe(
     """
 
     dtype = mx.float16 if decode_options.get("fp16", True) else mx.float32
-    model = ModelHolder.get_model(path_or_hf_repo, dtype)
+    model = ModelHolder.get_model(
+        path_or_hf_repo,
+        dtype,
+        model_dir=model_dir,
+        model_cache_only=model_cache_only,
+    )
 
     # Pad 30-seconds of silence to the input audio, for slicing
     mel = log_mel_spectrogram(audio, n_mels=model.dims.n_mels, padding=N_SAMPLES)

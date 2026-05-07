@@ -4,6 +4,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 
+from ._language import normalize_language_settings
 from .pipeline import MLXWhisperXPipeline, PipelineOptions
 
 
@@ -46,6 +47,7 @@ def transcribe(
     hf_token: Optional[str] = None,
     model_dir: Optional[str] = None,
     model_cache_only: bool = False,
+    clip_timestamps: str | Sequence[float] | None = None,
     device: str = "cpu",
     verbose: bool = False,
     print_progress: bool = False,
@@ -58,5 +60,8 @@ def transcribe(
     """
     kwargs = locals().copy()
     audio_obj = kwargs.pop("audio")
+    kwargs["language"], kwargs["task"] = normalize_language_settings(
+        kwargs["model"], kwargs.get("language"), kwargs.get("task")
+    )
     options = PipelineOptions(**kwargs)
     return MLXWhisperXPipeline(options).transcribe(audio_obj)

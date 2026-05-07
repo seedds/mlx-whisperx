@@ -21,6 +21,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 
+from ._language import normalize_language_settings
 from ._compat import import_mlx_whisper
 from .alignment import align, load_align_model
 from .audio import SAMPLE_RATE, audio_to_numpy, slice_audio
@@ -105,6 +106,7 @@ class PipelineOptions:
     hf_token: Optional[str] = None
     model_dir: Optional[str] = None
     model_cache_only: bool = False
+    clip_timestamps: str | Sequence[float] | None = None
     device: str = "cpu"
     verbose: bool = False
     print_progress: bool = False
@@ -116,11 +118,19 @@ class MLXWhisperXPipeline:
 
     def __init__(self, options: PipelineOptions):
         """Store pipeline options and lazily import the vendored ASR backend."""
+        options.language, options.task = normalize_language_settings(
+            options.model,
+            options.language,
+            options.task,
+        )
         self.options = options
         self._mlx_whisper = import_mlx_whisper()
 
     def transcribe(self, audio: str | np.ndarray) -> dict:
         """Execute the full configured pipeline for a path or waveform."""
+        if self.options.clip_timestamps is not None and not self.options.no_vad:
+            raise ValueError("clip_timestamps requires no_vad=True")
+
         audio_np = audio_to_numpy(audio)
         audio_path = audio if isinstance(audio, str) else None
 
@@ -326,18 +336,26 @@ class MLXWhisperXPipeline:
             # overriding them with null values.
             decode_kwargs = {key: value for key, value in decode_kwargs.items() if value is not None}
 
+            asr_kwargs = {
+                "path_or_hf_repo": self.options.model,
+                "model_dir": self.options.model_dir,
+                "model_cache_only": self.options.model_cache_only,
+                "verbose": None,
+                "temperature": self.options.temperature,
+                "compression_ratio_threshold": self.options.compression_ratio_threshold,
+                "logprob_threshold": self.options.logprob_threshold,
+                "no_speech_threshold": self.options.no_speech_threshold,
+                "condition_on_previous_text": self.options.condition_on_previous_text,
+                "initial_prompt": prompt,
+                "word_timestamps": False,
+                **decode_kwargs,
+            }
+            if self.options.clip_timestamps is not None:
+                asr_kwargs["clip_timestamps"] = self.options.clip_timestamps
+
             chunk_result = self._mlx_whisper.transcribe(
                 chunk_audio,
-                path_or_hf_repo=self.options.model,
-                verbose=None,
-                temperature=self.options.temperature,
-                compression_ratio_threshold=self.options.compression_ratio_threshold,
-                logprob_threshold=self.options.logprob_threshold,
-                no_speech_threshold=self.options.no_speech_threshold,
-                condition_on_previous_text=self.options.condition_on_previous_text,
-                initial_prompt=prompt,
-                word_timestamps=False,
-                **decode_kwargs,
+                **asr_kwargs,
             )
 
             detected_language = detected_language or chunk_result.get("language")

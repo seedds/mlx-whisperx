@@ -16,6 +16,8 @@ from . import whisper
 def load_model(
     path_or_hf_repo: str,
     dtype: mx.Dtype = mx.float32,
+    model_dir: str | None = None,
+    model_cache_only: bool = False,
 ) -> whisper.Whisper:
     """Load a local or Hugging Face MLX Whisper checkpoint.
 
@@ -27,7 +29,13 @@ def load_model(
     if not model_path.exists():
         # Treat non-existent local paths as Hugging Face repo IDs and let the Hub cache
         # provide the snapshot directory.
-        model_path = Path(snapshot_download(repo_id=path_or_hf_repo))
+        model_path = Path(
+            snapshot_download(
+                repo_id=path_or_hf_repo,
+                cache_dir=model_dir,
+                local_files_only=model_cache_only,
+            )
+        )
 
     with open(str(model_path / "config.json"), "r") as f:
         config = json.loads(f.read())

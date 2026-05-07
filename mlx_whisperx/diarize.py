@@ -19,7 +19,8 @@ class DiarizationPipeline:
         except Exception as exc:
             raise RuntimeError(
                 "Pyannote diarization could not be imported in this environment. "
-                "Fix the pyannote/torch/torchaudio install before using --diarize."
+                "Install the optional diarization dependencies with 'pip install mlx-whisperx[diarize]', "
+                "or fix the pyannote/torch/torchaudio install before using --diarize."
             ) from exc
         if isinstance(device, str):
             device = torch.device(device)

@@ -20,7 +20,8 @@ class Pyannote(Vad):
         except Exception as exc:
             raise RuntimeError(
                 "Pyannote VAD could not be imported in this environment. "
-                "Use --vad_method silero, or fix the pyannote/torch/torchaudio install."
+                "Install the optional diarization dependencies with 'pip install mlx-whisperx[diarize]', "
+                "use --vad_method silero, or fix the pyannote/torch/torchaudio install."
             ) from exc
 
         self._torch = torch

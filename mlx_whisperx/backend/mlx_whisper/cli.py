@@ -9,7 +9,7 @@ import traceback
 import warnings
 
 from . import audio
-from .tokenizer import LANGUAGES, TO_LANGUAGE_CODE
+from .languages import LANGUAGES, TO_LANGUAGE_CODE
 from .transcribe import transcribe
 from .writers import get_writer
 
