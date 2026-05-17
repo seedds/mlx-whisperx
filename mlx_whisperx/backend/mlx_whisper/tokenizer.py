@@ -22,7 +22,7 @@ class Tokenizer:
     timestamp tokens around the base BPE vocabulary.
     """
 
-    encoding: tiktoken.Encoding
+    encoding: "tiktoken.Encoding"
     num_languages: int
     language: Optional[str] = None
     task: Optional[str] = None

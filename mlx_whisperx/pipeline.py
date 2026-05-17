@@ -312,8 +312,43 @@ class MLXWhisperXPipeline:
             # The vendored backend accepts a single initial prompt string, so hotwords
             # are appended rather than passed through a separate API.
             prompt = f"{prompt or ''} {self.options.hotwords}".strip()
+        decode_kwargs = {
+            "language": language,
+            "task": self.options.task,
+            "best_of": self.options.best_of,
+            "beam_size": self.options.beam_size,
+            "patience": self.options.patience,
+            "length_penalty": self.options.length_penalty,
+            "suppress_tokens": suppress_tokens,
+            "fp16": self.options.fp16,
+            "without_timestamps": True,
+        }
+        # None-valued options should fall back to backend defaults rather than
+        # overriding them with null values.
+        decode_kwargs = {key: value for key, value in decode_kwargs.items() if value is not None}
+        asr_kwargs = {
+            "path_or_hf_repo": self.options.model,
+            "model_dir": self.options.model_dir,
+            "model_cache_only": self.options.model_cache_only,
+            "verbose": None,
+            "temperature": self.options.temperature,
+            "compression_ratio_threshold": self.options.compression_ratio_threshold,
+            "logprob_threshold": self.options.logprob_threshold,
+            "initial_prompt": prompt,
+            **decode_kwargs,
+        }
 
+        if self.options.no_vad:
+            return self._asr_without_vad(audio, vad_chunks, asr_kwargs)
+        return self._asr_with_vad(audio, vad_chunks, asr_kwargs)
+
+    def _asr_without_vad(self, audio: np.ndarray, vad_chunks: list[dict], asr_kwargs: dict) -> dict:
+        """Keep the existing backend seek-loop path for explicit no-VAD transcription."""
+        all_segments: list[dict] = []
+        language = self.options.language
+        detected_language = language
         total = len(vad_chunks)
+
         for idx, chunk in enumerate(vad_chunks):
             start = float(chunk["start"])
             end = float(chunk["end"])
@@ -321,42 +356,16 @@ class MLXWhisperXPipeline:
             if chunk_audio.size == 0:
                 continue
 
-            decode_kwargs = {
-                "language": language,
-                "task": self.options.task,
-                "best_of": self.options.best_of,
-                "beam_size": self.options.beam_size,
-                "patience": self.options.patience,
-                "length_penalty": self.options.length_penalty,
-                "suppress_tokens": suppress_tokens,
-                "fp16": self.options.fp16,
-                "without_timestamps": True,
-            }
-            # None-valued options should fall back to backend defaults rather than
-            # overriding them with null values.
-            decode_kwargs = {key: value for key, value in decode_kwargs.items() if value is not None}
-
-            asr_kwargs = {
-                "path_or_hf_repo": self.options.model,
-                "model_dir": self.options.model_dir,
-                "model_cache_only": self.options.model_cache_only,
-                "verbose": None,
-                "temperature": self.options.temperature,
-                "compression_ratio_threshold": self.options.compression_ratio_threshold,
-                "logprob_threshold": self.options.logprob_threshold,
+            backend_kwargs = {
                 "no_speech_threshold": self.options.no_speech_threshold,
                 "condition_on_previous_text": self.options.condition_on_previous_text,
-                "initial_prompt": prompt,
                 "word_timestamps": False,
-                **decode_kwargs,
+                **asr_kwargs,
             }
             if self.options.clip_timestamps is not None:
-                asr_kwargs["clip_timestamps"] = self.options.clip_timestamps
+                backend_kwargs["clip_timestamps"] = self.options.clip_timestamps
 
-            chunk_result = self._mlx_whisper.transcribe(
-                chunk_audio,
-                **asr_kwargs,
-            )
+            chunk_result = self._mlx_whisper.transcribe(chunk_audio, **backend_kwargs)
 
             detected_language = detected_language or chunk_result.get("language")
             language = language or detected_language
@@ -367,30 +376,72 @@ class MLXWhisperXPipeline:
                 # chunk-local segment so the downstream output schema remains uniform.
                 chunk_segments = [{"start": 0.0, "end": end - start, "text": chunk_result["text"]}]
 
-            for segment in chunk_segments:
-                text = segment.get("text", "")
-                if not text.strip():
-                    continue
-                asr_segment = {
-                    # Backend segment times are relative to the sliced chunk. Add the
-                    # VAD chunk start so alignment/diarization see absolute file time.
-                    "start": round(start + float(segment.get("start", 0.0)), 3),
-                    "end": round(start + float(segment.get("end", end - start)), 3),
-                    "text": text,
-                    **({"avg_logprob": segment["avg_logprob"]} if "avg_logprob" in segment else {}),
-                }
-                all_segments.append(asr_segment)
-                if self.options.verbose:
-                    print(
-                        "Transcript: "
-                        f"[{asr_segment['start']} --> {asr_segment['end']}] "
-                        f"{text.strip()}"
-                    )
+            self._append_asr_segments(all_segments, chunk_segments, start, end)
 
             if self.options.print_progress:
                 print(f"Progress: {((idx + 1) / total) * 50:.2f}%...")
 
         return {"segments": all_segments, "language": detected_language or language or "en"}
+
+    def _asr_with_vad(self, audio: np.ndarray, vad_chunks: list[dict], asr_kwargs: dict) -> dict:
+        """Decode each VAD chunk directly once, matching WhisperX's ASR flow."""
+        all_segments: list[dict] = []
+        language = self.options.language
+        if language is None:
+            language = self._mlx_whisper.detect_language(
+                audio,
+                path_or_hf_repo=self.options.model,
+                model_dir=self.options.model_dir,
+                model_cache_only=self.options.model_cache_only,
+                verbose=None,
+                fp16=self.options.fp16,
+            )
+
+        total = len(vad_chunks)
+        chunk_kwargs = {**asr_kwargs, "language": language}
+        for idx, chunk in enumerate(vad_chunks):
+            start = float(chunk["start"])
+            end = float(chunk["end"])
+            chunk_audio = slice_audio(audio, start, end)
+            if chunk_audio.size == 0:
+                continue
+
+            chunk_result = self._mlx_whisper.transcribe_chunk(chunk_audio, **chunk_kwargs)
+            chunk_segments = [chunk_result] if chunk_result.get("text", "").strip() else []
+            self._append_asr_segments(all_segments, chunk_segments, start, end)
+
+            if self.options.print_progress:
+                print(f"Progress: {((idx + 1) / total) * 50:.2f}%...")
+
+        return {"segments": all_segments, "language": language or "en"}
+
+    def _append_asr_segments(
+        self,
+        all_segments: list[dict],
+        chunk_segments: list[dict],
+        chunk_start: float,
+        chunk_end: float,
+    ) -> None:
+        """Copy chunk-local ASR segments into absolute file time."""
+        for segment in chunk_segments:
+            text = segment.get("text", "")
+            if not text.strip():
+                continue
+            asr_segment = {
+                # Backend segment times are relative to the sliced chunk. Add the VAD
+                # chunk start so alignment/diarization see absolute file time.
+                "start": round(chunk_start + float(segment.get("start", 0.0)), 3),
+                "end": round(chunk_start + float(segment.get("end", chunk_end - chunk_start)), 3),
+                "text": text,
+                **({"avg_logprob": segment["avg_logprob"]} if "avg_logprob" in segment else {}),
+            }
+            all_segments.append(asr_segment)
+            if self.options.verbose:
+                print(
+                    "Transcript: "
+                    f"[{asr_segment['start']} --> {asr_segment['end']}] "
+                    f"{text.strip()}"
+                )
 
     def _align(self, result: dict, audio: np.ndarray) -> dict:
         """Load a CTC alignment model and refine ASR segments to word timings."""

@@ -53,6 +53,36 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(kwargs["model_cache_only"])
         self.assertEqual(kwargs["clip_timestamps"], "0,5")
 
+    def test_asr_uses_direct_chunk_decode_in_vad_mode(self):
+        fake_backend = mock.Mock()
+        fake_backend.detect_language.return_value = "en"
+        fake_backend.transcribe_chunk.side_effect = [
+            {"start": 0.0, "end": 1.0, "text": "hello", "avg_logprob": -0.1},
+            {"start": 0.0, "end": 1.5, "text": "world", "avg_logprob": -0.2},
+        ]
+        with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
+            pipeline = MLXWhisperXPipeline(PipelineOptions())
+
+        result = pipeline._asr(
+            np.zeros(16000 * 5, dtype=np.float32),
+            [
+                {"start": 1.0, "end": 2.0, "segments": [(1.0, 2.0)]},
+                {"start": 3.0, "end": 4.5, "segments": [(3.0, 4.5)]},
+            ],
+        )
+
+        self.assertEqual(result["language"], "en")
+        self.assertEqual(
+            result["segments"],
+            [
+                {"start": 1.0, "end": 2.0, "text": "hello", "avg_logprob": -0.1},
+                {"start": 3.0, "end": 4.5, "text": "world", "avg_logprob": -0.2},
+            ],
+        )
+        fake_backend.detect_language.assert_called_once()
+        self.assertEqual(fake_backend.transcribe_chunk.call_count, 2)
+        fake_backend.transcribe.assert_not_called()
+
     def test_pipeline_normalizes_language_for_direct_usage(self):
         fake_backend = mock.Mock()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -69,7 +99,9 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(caught), 1)
 
     def test_model_holder_cache_keys_include_cache_settings(self):
-        sys.modules.setdefault("tiktoken", types.ModuleType("tiktoken"))
+        tiktoken = sys.modules.setdefault("tiktoken", types.ModuleType("tiktoken"))
+        if not hasattr(tiktoken, "Encoding"):
+            tiktoken.Encoding = object
         huggingface_hub = sys.modules.setdefault(
             "huggingface_hub",
             types.ModuleType("huggingface_hub"),

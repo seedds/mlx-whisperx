@@ -132,6 +132,21 @@ class SubtitlesWriter(ResultWriter):
 
             for segment in segments:
                 segment_words = [word for word in segment.get("words", []) if isinstance(word, dict)]
+                if not any(str(word.get("word", "")).strip() for word in segment_words):
+                    segment_text = segment.get("text", "").strip().replace("-->", "->")
+                    if segment_text:
+                        segment_words = [
+                            {
+                                "word": segment_text,
+                                "start": float(segment.get("start", 0.0)),
+                                "end": float(segment.get("end", 0.0)),
+                                **(
+                                    {"speaker": segment["speaker"]}
+                                    if "speaker" in segment
+                                    else {}
+                                ),
+                            }
+                        ]
                 for idx, original_timing in enumerate(segment_words):
                     timing = original_timing.copy()
                     word_text = str(timing.get("word", ""))

@@ -16,6 +16,7 @@ from .audio import (
     N_FRAMES,
     N_SAMPLES,
     SAMPLE_RATE,
+    load_audio,
     log_mel_spectrogram,
     pad_or_trim,
 )
@@ -77,6 +78,168 @@ class ModelHolder:
             )
             cls.model_key = model_key
         return cls.model
+
+
+def _audio_to_mx(audio: Union[str, np.ndarray, mx.array]) -> mx.array:
+    """Normalize chunk inputs into the MLX waveform array expected by the backend."""
+    if isinstance(audio, str):
+        return load_audio(audio)
+    if not isinstance(audio, mx.array):
+        return mx.array(audio)
+    return audio
+
+
+def _resolve_language(
+    model,
+    audio: Union[str, np.ndarray, mx.array],
+    dtype: mx.Dtype,
+    decode_options: dict,
+    verbose: Optional[bool],
+) -> str:
+    """Return an explicit language code for chunk decoding."""
+    language = decode_options.get("language")
+    if language is not None:
+        return language
+    if not model.is_multilingual:
+        return "en"
+
+    if verbose:
+        print(
+            "Detecting language using up to the first 30 seconds. "
+            "Use the `language` decoding option to specify the language"
+        )
+
+    mel = log_mel_spectrogram(audio, n_mels=model.dims.n_mels, padding=N_SAMPLES)
+    mel_segment = pad_or_trim(mel, N_FRAMES, axis=-2).astype(dtype)
+    _, probs = model.detect_language(mel_segment)
+    language = max(probs, key=probs.get)
+
+    if verbose is not None:
+        print(f"Detected language: {LANGUAGES[language].title()}")
+
+    return language
+
+
+def _decode_with_fallback(
+    model,
+    segment: mx.array,
+    *,
+    temperature: Union[float, Tuple[float, ...]],
+    compression_ratio_threshold: Optional[float],
+    logprob_threshold: Optional[float],
+    decode_options: dict,
+) -> DecodingResult:
+    """Decode one fixed chunk while preserving Whisper fallback heuristics."""
+    temperatures = [temperature] if isinstance(temperature, (int, float)) else temperature
+    decode_result = None
+
+    for t in temperatures:
+        kwargs = {**decode_options}
+        if t > 0:
+            kwargs.pop("beam_size", None)
+            kwargs.pop("patience", None)
+        else:
+            kwargs.pop("best_of", None)
+
+        options = DecodingOptions(**kwargs, temperature=t)
+        decode_result = model.decode(segment, options)
+
+        needs_fallback = False
+        if (
+            compression_ratio_threshold is not None
+            and decode_result.compression_ratio > compression_ratio_threshold
+        ):
+            needs_fallback = True
+        if (
+            logprob_threshold is not None
+            and decode_result.avg_logprob < logprob_threshold
+        ):
+            needs_fallback = True
+        if not needs_fallback:
+            break
+
+    return decode_result
+
+
+def detect_language(
+    audio: Union[str, np.ndarray, mx.array],
+    *,
+    path_or_hf_repo: str = "mlx-community/whisper-tiny",
+    model_dir: Optional[str] = None,
+    model_cache_only: bool = False,
+    verbose: Optional[bool] = None,
+    fp16: bool = True,
+) -> str:
+    """Detect the language once for a WhisperX-style VAD decode pass."""
+    dtype = mx.float16 if fp16 else mx.float32
+    model = ModelHolder.get_model(
+        path_or_hf_repo,
+        dtype,
+        model_dir=model_dir,
+        model_cache_only=model_cache_only,
+    )
+    return _resolve_language(model, _audio_to_mx(audio), dtype, {}, verbose)
+
+
+def transcribe_chunk(
+    audio: Union[str, np.ndarray, mx.array],
+    *,
+    path_or_hf_repo: str = "mlx-community/whisper-tiny",
+    model_dir: Optional[str] = None,
+    model_cache_only: bool = False,
+    verbose: Optional[bool] = None,
+    temperature: Union[float, Tuple[float, ...]] = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+    compression_ratio_threshold: Optional[float] = 2.4,
+    logprob_threshold: Optional[float] = -1.0,
+    initial_prompt: Optional[str] = None,
+    **decode_options,
+) -> dict:
+    """Decode a single VAD chunk once, without re-entering the seek loop."""
+    dtype = mx.float16 if decode_options.get("fp16", True) else mx.float32
+    model = ModelHolder.get_model(
+        path_or_hf_repo,
+        dtype,
+        model_dir=model_dir,
+        model_cache_only=model_cache_only,
+    )
+    audio = _audio_to_mx(audio)
+    duration = float(audio.shape[0] / SAMPLE_RATE)
+    language = _resolve_language(model, audio, dtype, decode_options, verbose)
+    task: str = decode_options.get("task", "transcribe")
+    tokenizer = get_tokenizer(
+        model.is_multilingual,
+        num_languages=model.num_languages,
+        language=language,
+        task=task,
+    )
+
+    mel = log_mel_spectrogram(audio, n_mels=model.dims.n_mels)
+    mel = pad_or_trim(mel, N_FRAMES, axis=-2).astype(dtype)
+    decode_kwargs = {**decode_options, "language": language}
+    if initial_prompt is not None:
+        decode_kwargs["prompt"] = initial_prompt
+    result = _decode_with_fallback(
+        model,
+        mel,
+        temperature=temperature,
+        compression_ratio_threshold=compression_ratio_threshold,
+        logprob_threshold=logprob_threshold,
+        decode_options=decode_kwargs,
+    )
+    tokens = np.array(result.tokens)
+    text_tokens = [token for token in tokens.tolist() if token < tokenizer.eot]
+    text = tokenizer.decode(text_tokens)
+
+    return {
+        "start": 0.0,
+        "end": duration,
+        "text": text,
+        "tokens": tokens.tolist(),
+        "avg_logprob": result.avg_logprob,
+        "compression_ratio": result.compression_ratio,
+        "no_speech_prob": result.no_speech_prob,
+        "language": language,
+    }
 
 
 def transcribe(

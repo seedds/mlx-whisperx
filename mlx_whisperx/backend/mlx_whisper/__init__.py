@@ -19,6 +19,20 @@ def transcribe(*args, **kwargs):
     return _transcribe(*args, **kwargs)
 
 
+def detect_language(*args, **kwargs):
+    """Lazy wrapper for language detection used by VAD chunk decoding."""
+    from .transcribe import detect_language as _detect_language
+
+    return _detect_language(*args, **kwargs)
+
+
+def transcribe_chunk(*args, **kwargs):
+    """Lazy wrapper for direct single-chunk decoding in VAD mode."""
+    from .transcribe import transcribe_chunk as _transcribe_chunk
+
+    return _transcribe_chunk(*args, **kwargs)
+
+
 def __getattr__(name: str):
     """Lazily expose backend modules without importing tokenizer dependencies early."""
     if name in {"audio", "decoding", "languages", "load_models"}:
@@ -26,4 +40,13 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = ["__version__", "audio", "decoding", "languages", "load_models", "transcribe"]
+__all__ = [
+    "__version__",
+    "audio",
+    "decoding",
+    "detect_language",
+    "languages",
+    "load_models",
+    "transcribe",
+    "transcribe_chunk",
+]
