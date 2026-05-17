@@ -23,7 +23,7 @@ import numpy as np
 
 from ._language import normalize_language_settings
 from ._compat import import_mlx_whisper
-from .alignment import align, load_align_model
+from .alignment import AlignmentDependencyError, align, load_align_model
 from .audio import SAMPLE_RATE, audio_to_numpy, slice_audio
 from .diarize import DiarizationPipeline, assign_word_speakers
 from .log_utils import get_logger
@@ -96,6 +96,7 @@ class PipelineOptions:
     no_vad: bool = False
     align_model: Optional[str] = None
     no_align: bool = False
+    allow_missing_alignment_deps: bool = False
     interpolate_method: str = "nearest"
     return_char_alignments: bool = False
     diarize: bool = False
@@ -150,7 +151,15 @@ class MLXWhisperXPipeline:
             no_align = self.options.no_align
 
         if not no_align and result["segments"]:
-            result = self._align(result, audio_np)
+            try:
+                result = self._align(result, audio_np)
+            except AlignmentDependencyError:
+                if not self.options.allow_missing_alignment_deps:
+                    raise
+                logger.warning(
+                    "Alignment dependencies are unavailable; continuing without forced alignment "
+                    "because allow_missing_alignment_deps=True."
+                )
 
         if self.options.diarize:
             result = self._diarize(result, audio_path or audio_np)
@@ -326,11 +335,16 @@ class MLXWhisperXPipeline:
         # None-valued options should fall back to backend defaults rather than
         # overriding them with null values.
         decode_kwargs = {key: value for key, value in decode_kwargs.items() if value is not None}
+        backend_verbose = None
+        if self.options.no_vad and (self.options.print_progress or self.options.verbose):
+            # The full-file backend seek loop can run for a long time with no outer
+            # chunk boundaries, so enable the backend progress bar in no-VAD mode.
+            backend_verbose = False
         asr_kwargs = {
             "path_or_hf_repo": self.options.model,
             "model_dir": self.options.model_dir,
             "model_cache_only": self.options.model_cache_only,
-            "verbose": None,
+            "verbose": backend_verbose,
             "temperature": self.options.temperature,
             "compression_ratio_threshold": self.options.compression_ratio_threshold,
             "logprob_threshold": self.options.logprob_threshold,
@@ -348,6 +362,11 @@ class MLXWhisperXPipeline:
         language = self.options.language
         detected_language = language
         total = len(vad_chunks)
+        backend_transcribe = self._mlx_whisper.transcribe
+        if not callable(backend_transcribe):
+            # Importing the vendored backend submodule can shadow the package-level
+            # wrapper with the module object; resolve the real callable here.
+            backend_transcribe = backend_transcribe.transcribe
 
         for idx, chunk in enumerate(vad_chunks):
             start = float(chunk["start"])
@@ -365,7 +384,7 @@ class MLXWhisperXPipeline:
             if self.options.clip_timestamps is not None:
                 backend_kwargs["clip_timestamps"] = self.options.clip_timestamps
 
-            chunk_result = self._mlx_whisper.transcribe(chunk_audio, **backend_kwargs)
+            chunk_result = backend_transcribe(chunk_audio, **backend_kwargs)
 
             detected_language = detected_language or chunk_result.get("language")
             language = language or detected_language

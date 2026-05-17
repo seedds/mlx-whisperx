@@ -107,6 +107,12 @@ class SubtitlesWriter(ResultWriter):
             return "".join(words)
         return " ".join(words).replace(" \n", "\n").replace("\n ", "\n")
 
+    @staticmethod
+    def _split_unaligned_segment_text(text: str) -> list[str]:
+        """Split long unaligned text into sentence-like subtitle chunks."""
+        chunks = [match.strip() for match in re.findall(r"[^.!?。！？]+[.!?。！？]*", text) if match.strip()]
+        return chunks or ([text] if text else [])
+
     def iterate_result(self, result: dict, options: dict):
         """Yield `(start, end, text)` subtitle cues from a normalized result."""
         segments = result.get("segments", [])
@@ -246,12 +252,40 @@ class SubtitlesWriter(ResultWriter):
             return
 
         for segment in segments:
-            # Fallback for unaligned output: segment timings only, no word wrapping.
-            yield (
-                self.format_timestamp(segment.get("start", 0.0)),
-                self.format_timestamp(segment.get("end", 0.0)),
-                self._segment_text(segment),
-            )
+            # Fallback for unaligned output: split sentence-like text into approximate
+            # cues so full-file no-VAD subtitles do not collapse into 30-second blocks.
+            text = segment.get("text", "").strip().replace("-->", "->")
+            if not text:
+                continue
+            speaker = segment.get("speaker")
+            prefix = f"[{speaker}]: " if speaker else ""
+            start = float(segment.get("start", 0.0))
+            end = float(segment.get("end", 0.0))
+            chunks = self._split_unaligned_segment_text(text)
+            if len(chunks) <= 1 or end <= start:
+                yield (
+                    self.format_timestamp(start),
+                    self.format_timestamp(end),
+                    prefix + text,
+                )
+                continue
+
+            total_weight = sum(max(len(chunk), 1) for chunk in chunks)
+            chunk_start = start
+            consumed_weight = 0
+            duration = end - start
+            for idx, chunk in enumerate(chunks):
+                consumed_weight += max(len(chunk), 1)
+                if idx == len(chunks) - 1:
+                    chunk_end = end
+                else:
+                    chunk_end = start + duration * (consumed_weight / total_weight)
+                yield (
+                    self.format_timestamp(chunk_start),
+                    self.format_timestamp(chunk_end),
+                    prefix + chunk,
+                )
+                chunk_start = chunk_end
 
 
 class WriteVTT(SubtitlesWriter):

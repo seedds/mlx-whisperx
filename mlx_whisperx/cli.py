@@ -54,6 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--align_model", default=None, help="Alignment model name")
     parser.add_argument("--interpolate_method", default="nearest", choices=["nearest", "linear", "ignore"], help="Timestamp interpolation for unaligned words")
     parser.add_argument("--no_align", action="store_true", help="Skip forced alignment")
+    parser.add_argument("--allow_missing_alignment_deps", action="store_true", help="Continue without forced alignment when torch, torchaudio, or transformers are unavailable")
     parser.add_argument("--return_char_alignments", action="store_true", help="Return character alignments in JSON")
 
     parser.add_argument("--vad_method", default="silero", choices=["pyannote", "silero"], help="VAD backend")

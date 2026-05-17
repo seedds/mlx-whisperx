@@ -37,6 +37,7 @@ def transcribe(
     vad_dump_path: Optional[str] = None,
     align_model: Optional[str] = None,
     no_align: bool = False,
+    allow_missing_alignment_deps: bool = False,
     interpolate_method: str = "nearest",
     return_char_alignments: bool = False,
     diarize: bool = False,

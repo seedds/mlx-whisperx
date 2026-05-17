@@ -20,6 +20,10 @@ from .log_utils import get_logger
 # importing the upstream whisperx package at runtime.
 logger = get_logger(__name__)
 
+
+class AlignmentDependencyError(RuntimeError):
+    """Alignment-specific optional dependencies could not be imported."""
+
 LANGUAGES_WITHOUT_SPACES = {"ja", "zh"}
 PUNKT_LANGUAGES = {
     "cs": "czech",
@@ -143,7 +147,7 @@ def load_align_model(
         import torchaudio
         from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
     except Exception as exc:
-        raise RuntimeError(
+        raise AlignmentDependencyError(
             "Alignment dependencies could not be imported. Install compatible torch, "
             "torchaudio, and transformers packages before using alignment, or pass no_align=True."
         ) from exc
@@ -219,7 +223,7 @@ def align(
     try:
         import torch
     except Exception as exc:
-        raise RuntimeError("PyTorch is required for alignment, or pass no_align=True.") from exc
+        raise AlignmentDependencyError("PyTorch is required for alignment, or pass no_align=True.") from exc
 
     if not torch.is_tensor(audio):
         # Accept either a path, NumPy waveform, or Torch tensor to match the public API.

@@ -40,3 +40,26 @@ class WriterTests(unittest.TestCase):
             "00:00:01,200 --> 00:00:02,000\n"
             "missing line\n\n",
         )
+
+    def test_srt_splits_unaligned_multisentence_segments(self):
+        writer = WriteSRT(".")
+        output = io.StringIO()
+        result = {
+            "language": "en",
+            "segments": [
+                {
+                    "start": 240.0,
+                    "end": 268.0,
+                    "text": "Next stop, Gaseous Gardens. Hey! You don't have brakes! It'll come to him. Huh?",
+                    "words": [],
+                }
+            ],
+        }
+
+        writer.write_result(result, output, {})
+
+        self.assertIn("Next stop, Gaseous Gardens.", output.getvalue())
+        self.assertIn("Hey!", output.getvalue())
+        self.assertIn("You don't have brakes!", output.getvalue())
+        self.assertIn("It'll come to him.", output.getvalue())
+        self.assertIn("Huh?", output.getvalue())

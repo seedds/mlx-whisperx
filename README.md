@@ -39,6 +39,14 @@ cd mlx-whisperx
 python -m pip install -e .
 ```
 
+The published package constrains the alignment stack to a tested range:
+
+- `torch 2.11.x`
+- `torchaudio 2.11.x`
+- `transformers >=5,<6`
+
+`torchvision` is not required for alignment.
+
 Install diarization support only when you need pyannote:
 
 ```bash
@@ -344,6 +352,7 @@ export MLX_WHISPERX_SILERO_VAD_PATH=/path/to/snakers4_silero-vad
 Alignment options:
 
 - `--no_align`: skip forced alignment.
+- `--allow_missing_alignment_deps`: continue without forced alignment when alignment dependencies are unavailable.
 - `--align_model`: override the alignment model.
 - `--interpolate_method`: `nearest`, `linear`, or `ignore`.
 - `--return_char_alignments`: include character alignments in JSON.
@@ -423,6 +432,12 @@ Skip forced alignment:
 mlx-whisperx audio.wav --no_align --output_format json
 ```
 
+Continue when alignment dependencies are unavailable:
+
+```bash
+mlx-whisperx audio.wav --allow_missing_alignment_deps --output_format json
+```
+
 Run diarization:
 
 ```bash
@@ -443,6 +458,7 @@ mlx-whisperx first.wav second.wav third.wav --output_dir transcripts --output_fo
 - ASR decodes merged VAD chunks serially.
 - There is no `batch_size` CLI or API option.
 - `translate` skips forced alignment because alignment models are transcription-language specific.
+- Missing `torch`, `torchaudio`, or `transformers` still fail alignment by default; pass `--allow_missing_alignment_deps` to continue with ASR-only output instead.
 - `clip_timestamps` is only supported with `--no_vad` because VAD chunking changes the timing base before ASR runs.
 - Pyannote VAD and diarization depend on a compatible PyTorch, torchaudio, pyannote installation, and Hugging Face model access when the selected model is gated.
 - The vendored ASR backend lives under `mlx_whisperx.backend.mlx_whisper` so decoder behavior can be changed without modifying external reference repositories.

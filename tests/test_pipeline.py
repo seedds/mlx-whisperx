@@ -10,6 +10,7 @@ from unittest import mock
 
 import numpy as np
 
+from mlx_whisperx.alignment import AlignmentDependencyError
 from mlx_whisperx.pipeline import MLXWhisperXPipeline, PipelineOptions
 
 
@@ -52,6 +53,46 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(kwargs["model_dir"], "/tmp/model-cache")
         self.assertTrue(kwargs["model_cache_only"])
         self.assertEqual(kwargs["clip_timestamps"], "0,5")
+
+    def test_no_vad_enables_backend_progress_when_verbose(self):
+        fake_backend = mock.Mock()
+        fake_backend.transcribe.return_value = {
+            "segments": [{"start": 0.0, "end": 1.0, "text": "hello"}],
+            "language": "en",
+            "text": "hello",
+        }
+        options = PipelineOptions(no_vad=True, language="en", verbose=True)
+        with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
+            pipeline = MLXWhisperXPipeline(options)
+
+        pipeline._asr(
+            np.zeros(16000, dtype=np.float32),
+            [{"start": 0.0, "end": 1.0, "segments": [(0.0, 1.0)]}],
+        )
+
+        self.assertFalse(fake_backend.transcribe.call_args.kwargs["verbose"])
+
+    def test_asr_without_vad_handles_shadowed_backend_transcribe_module(self):
+        transcribe_func = mock.Mock(
+            return_value={
+                "segments": [{"start": 0.0, "end": 1.0, "text": "hello"}],
+                "language": "en",
+                "text": "hello",
+            }
+        )
+        fake_backend = types.SimpleNamespace(
+            transcribe=types.SimpleNamespace(transcribe=transcribe_func)
+        )
+        with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
+            pipeline = MLXWhisperXPipeline(PipelineOptions(no_vad=True, language="en"))
+
+        result = pipeline._asr(
+            np.zeros(16000, dtype=np.float32),
+            [{"start": 0.0, "end": 1.0, "segments": [(0.0, 1.0)]}],
+        )
+
+        self.assertEqual(result["segments"][0]["text"], "hello")
+        transcribe_func.assert_called_once()
 
     def test_asr_uses_direct_chunk_decode_in_vad_mode(self):
         fake_backend = mock.Mock()
@@ -97,6 +138,76 @@ class PipelineTests(unittest.TestCase):
 
         self.assertEqual(pipeline.options.language, "en")
         self.assertEqual(len(caught), 1)
+
+    def test_pipeline_can_continue_without_alignment_when_opted_in(self):
+        fake_backend = mock.Mock()
+        fake_backend.transcribe.return_value = {
+            "segments": [{"start": 0.0, "end": 1.0, "text": "hello"}],
+            "language": "en",
+            "text": "hello",
+        }
+        with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
+            pipeline = MLXWhisperXPipeline(
+                PipelineOptions(
+                    no_vad=True,
+                    language="en",
+                    allow_missing_alignment_deps=True,
+                )
+            )
+
+        with mock.patch.object(
+            pipeline,
+            "_align",
+            side_effect=AlignmentDependencyError("missing alignment deps"),
+        ):
+            result = pipeline.transcribe(np.zeros(16000, dtype=np.float32))
+
+        self.assertEqual(result["language"], "en")
+        self.assertEqual(result["word_segments"], [])
+        self.assertEqual(result["segments"][0]["text"], "hello")
+        self.assertEqual(result["segments"][0]["words"], [])
+
+    def test_pipeline_still_raises_alignment_dependency_errors_by_default(self):
+        fake_backend = mock.Mock()
+        fake_backend.transcribe.return_value = {
+            "segments": [{"start": 0.0, "end": 1.0, "text": "hello"}],
+            "language": "en",
+            "text": "hello",
+        }
+        with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
+            pipeline = MLXWhisperXPipeline(PipelineOptions(no_vad=True, language="en"))
+
+        with (
+            mock.patch.object(
+                pipeline,
+                "_align",
+                side_effect=AlignmentDependencyError("missing alignment deps"),
+            ),
+            self.assertRaisesRegex(AlignmentDependencyError, "missing alignment deps"),
+        ):
+            pipeline.transcribe(np.zeros(16000, dtype=np.float32))
+
+    def test_pipeline_does_not_mask_other_alignment_failures(self):
+        fake_backend = mock.Mock()
+        fake_backend.transcribe.return_value = {
+            "segments": [{"start": 0.0, "end": 1.0, "text": "hello"}],
+            "language": "en",
+            "text": "hello",
+        }
+        with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
+            pipeline = MLXWhisperXPipeline(
+                PipelineOptions(
+                    no_vad=True,
+                    language="en",
+                    allow_missing_alignment_deps=True,
+                )
+            )
+
+        with (
+            mock.patch.object(pipeline, "_align", side_effect=RuntimeError("alignment broke")),
+            self.assertRaisesRegex(RuntimeError, "alignment broke"),
+        ):
+            pipeline.transcribe(np.zeros(16000, dtype=np.float32))
 
     def test_model_holder_cache_keys_include_cache_settings(self):
         tiktoken = sys.modules.setdefault("tiktoken", types.ModuleType("tiktoken"))

@@ -99,3 +99,32 @@ class CLITests(unittest.TestCase):
         self.assertEqual(calls[0]["language"], "en")
         self.assertEqual(len(caught), 1)
         self.assertIn("English-only model", str(caught[0].message))
+
+    def test_main_forwards_allow_missing_alignment_deps(self):
+        calls: list[dict] = []
+
+        def fake_transcribe(audio_path, **kwargs):
+            calls.append({"audio_path": audio_path, **kwargs})
+            return {"segments": [], "word_segments": [], "language": "en"}
+
+        writer = mock.Mock()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            argv = [
+                "mlx-whisperx",
+                "audio.wav",
+                "--allow_missing_alignment_deps",
+                "--output_dir",
+                tmpdir,
+                "--output_format",
+                "json",
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch("mlx_whisperx.cli.transcribe", side_effect=fake_transcribe),
+                mock.patch("mlx_whisperx.cli.get_writer", return_value=writer),
+            ):
+                cli.main()
+
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0]["allow_missing_alignment_deps"])
+        writer.assert_called_once()
