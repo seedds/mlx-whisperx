@@ -1,9 +1,25 @@
 """Pyannote voice activity detection backend implementation."""
 
+from .._compat import prepare_pyannote_audio_compat
 from .vad import Segment, Vad
 
 
 DEFAULT_PYANNOTE_VAD_MODEL = "pyannote/segmentation-3.0"
+
+
+def _voice_activity_hyperparameters(pipeline, vad_onset: float, vad_offset: float) -> dict:
+    """Return only the hyperparameters supported by the installed pyannote pipeline."""
+    available = set(pipeline.parameters(instantiated=False))
+    params = {}
+    if "onset" in available:
+        params["onset"] = vad_onset
+    if "offset" in available:
+        params["offset"] = vad_offset
+    if "min_duration_on" in available:
+        params["min_duration_on"] = 0.1
+    if "min_duration_off" in available:
+        params["min_duration_off"] = 0.1
+    return params
 
 
 class Pyannote(Vad):
@@ -13,6 +29,7 @@ class Pyannote(Vad):
         """Load and configure pyannote voice activity detection."""
         super().__init__(kwargs["vad_onset"])
         try:
+            prepare_pyannote_audio_compat()
             import torch
             from pyannote.audio import Model
             from pyannote.audio.pipelines import VoiceActivityDetection
@@ -44,12 +61,7 @@ class Pyannote(Vad):
             ) from exc
         pipeline = VoiceActivityDetection(segmentation=model, device=torch.device(device))
         pipeline.instantiate(
-            {
-                "onset": self.vad_onset,
-                "offset": self.vad_offset,
-                "min_duration_on": 0.1,
-                "min_duration_off": 0.1,
-            }
+            _voice_activity_hyperparameters(pipeline, self.vad_onset, self.vad_offset)
         )
         self.vad_pipeline = pipeline
 

@@ -5,6 +5,7 @@ from typing import Optional, Union
 import numpy as np
 import pandas as pd
 
+from ._compat import prepare_pyannote_audio_compat
 from .audio import SAMPLE_RATE, audio_to_numpy
 
 
@@ -14,6 +15,7 @@ class DiarizationPipeline:
     def __init__(self, model_name=None, token=None, device="cpu", cache_dir=None):
         """Load the requested pyannote diarization model on the requested device."""
         try:
+            prepare_pyannote_audio_compat()
             import torch
             from pyannote.audio import Pipeline
         except Exception as exc:

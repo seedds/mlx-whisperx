@@ -1,10 +1,13 @@
 import builtins
+import types
 import unittest
 from unittest import mock
 
 import mlx_whisperx
 from mlx_whisperx.alignment import AlignmentDependencyError, load_align_model
+from mlx_whisperx._compat import patch_torchaudio_for_pyannote
 from mlx_whisperx import DiarizationPipeline
+from mlx_whisperx.vads._pyannote_impl import _voice_activity_hyperparameters
 from mlx_whisperx.vads.pyannote import Pyannote
 
 
@@ -24,6 +27,32 @@ _REAL_IMPORT = builtins.__import__
 
 
 class OptionalImportTests(unittest.TestCase):
+    def test_voice_activity_hyperparameters_filter_to_supported_keys(self):
+        pipeline = types.SimpleNamespace(
+            parameters=lambda instantiated=False: {
+                "min_duration_on": object(),
+                "min_duration_off": object(),
+            }
+        )
+
+        params = _voice_activity_hyperparameters(pipeline, 0.5, 0.363)
+
+        self.assertEqual(
+            params,
+            {
+                "min_duration_on": 0.1,
+                "min_duration_off": 0.1,
+            },
+        )
+
+    def test_patch_torchaudio_for_pyannote_adds_missing_backend_probe(self):
+        torchaudio = types.SimpleNamespace()
+
+        patch_torchaudio_for_pyannote(torchaudio)
+
+        self.assertTrue(hasattr(torchaudio, "list_audio_backends"))
+        self.assertEqual(torchaudio.list_audio_backends(), ["soundfile"])
+
     def test_root_package_exports_diarization_helpers(self):
         self.assertTrue(hasattr(mlx_whisperx, "DiarizationPipeline"))
         self.assertIs(DiarizationPipeline, mlx_whisperx.DiarizationPipeline)
