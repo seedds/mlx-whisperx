@@ -34,6 +34,7 @@ def transcribe(
     vad_model: Optional[str] = None,
     chunk_size: int = 30,
     no_vad: bool = False,
+    vad_cut_only: bool = False,
     vad_dump_path: Optional[str] = None,
     align_model: Optional[str] = None,
     no_align: bool = False,

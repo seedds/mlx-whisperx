@@ -63,6 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vad_model", default=None, help="Hugging Face pyannote segmentation model used when --vad_method pyannote")
     parser.add_argument("--chunk_size", type=int, default=30, help="Merged VAD chunk size in seconds")
     parser.add_argument("--no_vad", action="store_true", help="Skip VAD and transcribe the full file as one chunk")
+    parser.add_argument("--vad_cut_only", action="store_true", help="Use VAD boundaries to cut the file without dropping non-speech regions")
     parser.add_argument("--clip_timestamps", default=None, help="Comma-separated start,end,start,end,... timestamps in seconds. Requires --no_vad.")
     parser.add_argument("--vad_dump_path", default=None, help="Write VAD chunks and settings to this JSON path")
 

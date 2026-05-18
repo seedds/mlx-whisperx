@@ -94,6 +94,7 @@ class PipelineOptions:
     vad_model: Optional[str] = None
     chunk_size: int = 30
     no_vad: bool = False
+    vad_cut_only: bool = False
     align_model: Optional[str] = None
     no_align: bool = False
     allow_missing_alignment_deps: bool = False
@@ -218,7 +219,7 @@ class MLXWhisperXPipeline:
         return normalized
 
     def _vad_chunks(self, audio: np.ndarray) -> list[dict]:
-        """Run the selected VAD backend and return merged speech chunks."""
+        """Run VAD and return either speech-only or boundary-preserving chunks."""
         duration = len(audio) / SAMPLE_RATE
         if self.options.no_vad:
             # Keep the downstream ASR path identical by representing full-file ASR as
@@ -265,8 +266,49 @@ class MLXWhisperXPipeline:
             onset=self.options.vad_onset,
             offset=self.options.vad_offset,
         )
+        if self.options.vad_cut_only:
+            chunks = self._vad_cut_only_chunks(chunks, duration)
         chunks = [chunk for chunk in chunks if chunk["end"] > chunk["start"]]
         self._dump_vad_chunks(chunks, duration)
+        return chunks
+
+    def _vad_cut_only_chunks(self, speech_chunks: list[dict], audio_duration: float) -> list[dict]:
+        """Expand speech-only VAD chunks into full-timeline chunks cut at VAD boundaries."""
+        if audio_duration <= 0:
+            return []
+        if not speech_chunks:
+            return [{"start": 0.0, "end": audio_duration, "segments": []}]
+
+        boundaries = {0.0, audio_duration}
+        speech_segments: list[tuple[float, float]] = []
+        for chunk in speech_chunks:
+            start = max(0.0, float(chunk["start"]))
+            end = min(audio_duration, float(chunk["end"]))
+            if end <= start:
+                continue
+            boundaries.add(start)
+            boundaries.add(end)
+            for seg_start, seg_end in chunk.get("segments", []):
+                clipped_start = max(start, float(seg_start))
+                clipped_end = min(end, float(seg_end))
+                if clipped_end > clipped_start:
+                    speech_segments.append((clipped_start, clipped_end))
+
+        chunks: list[dict] = []
+        sorted_boundaries = sorted(boundaries)
+        max_chunk = float(self.options.chunk_size)
+        for boundary_start, boundary_end in zip(sorted_boundaries, sorted_boundaries[1:]):
+            cursor = boundary_start
+            while cursor < boundary_end:
+                chunk_end = boundary_end if max_chunk <= 0 else min(boundary_end, cursor + max_chunk)
+                chunk_segments = []
+                for seg_start, seg_end in speech_segments:
+                    if seg_end <= cursor or seg_start >= chunk_end:
+                        continue
+                    chunk_segments.append((max(cursor, seg_start), min(chunk_end, seg_end)))
+                chunks.append({"start": cursor, "end": chunk_end, "segments": chunk_segments})
+                cursor = chunk_end
+
         return chunks
 
     def _dump_vad_chunks(self, chunks: list[dict], audio_duration: float) -> None:
@@ -281,6 +323,7 @@ class MLXWhisperXPipeline:
             "vad_model": self.options.vad_model,
             "chunk_size": self.options.chunk_size,
             "no_vad": self.options.no_vad,
+            "vad_cut_only": self.options.vad_cut_only,
             "audio_duration": round(audio_duration, 3),
             "chunk_count": len(chunks),
             "chunks": [
@@ -330,7 +373,11 @@ class MLXWhisperXPipeline:
             "length_penalty": self.options.length_penalty,
             "suppress_tokens": suppress_tokens,
             "fp16": self.options.fp16,
-            "without_timestamps": True,
+            # VAD chunk decoding does not need backend timestamp tokens because forced
+            # alignment will refine the chunk text later. Full-file no-VAD decoding
+            # needs backend segment timestamps so alignment/subtitle timing is anchored
+            # to tighter spans instead of whole 30-second windows.
+            "without_timestamps": not (self.options.no_vad or self.options.vad_cut_only),
         }
         # None-valued options should fall back to backend defaults rather than
         # overriding them with null values.
@@ -352,7 +399,7 @@ class MLXWhisperXPipeline:
             **decode_kwargs,
         }
 
-        if self.options.no_vad:
+        if self.options.no_vad or self.options.vad_cut_only:
             return self._asr_without_vad(audio, vad_chunks, asr_kwargs)
         return self._asr_with_vad(audio, vad_chunks, asr_kwargs)
 

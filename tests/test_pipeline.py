@@ -71,6 +71,61 @@ class PipelineTests(unittest.TestCase):
         )
 
         self.assertFalse(fake_backend.transcribe.call_args.kwargs["verbose"])
+        self.assertFalse(fake_backend.transcribe.call_args.kwargs["without_timestamps"])
+
+    def test_vad_cut_only_uses_backend_transcribe_with_timestamps(self):
+        fake_backend = mock.Mock()
+        fake_backend.transcribe.return_value = {
+            "segments": [{"start": 0.0, "end": 1.0, "text": "hello"}],
+            "language": "en",
+            "text": "hello",
+        }
+        fake_backend.transcribe_chunk.return_value = {"start": 0.0, "end": 1.0, "text": "ignored"}
+        options = PipelineOptions(vad_cut_only=True, language="en")
+        with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
+            pipeline = MLXWhisperXPipeline(options)
+
+        result = pipeline._asr(
+            np.zeros(16000, dtype=np.float32),
+            [{"start": 0.0, "end": 1.0, "segments": []}],
+        )
+
+        self.assertEqual(result["segments"][0]["text"], "hello")
+        self.assertFalse(fake_backend.transcribe.call_args.kwargs["without_timestamps"])
+        fake_backend.transcribe.assert_called_once()
+        fake_backend.transcribe_chunk.assert_not_called()
+
+    def test_vad_cut_only_chunks_preserve_full_timeline(self):
+        fake_backend = mock.Mock()
+        with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
+            pipeline = MLXWhisperXPipeline(PipelineOptions(vad_cut_only=True, chunk_size=5))
+
+        chunks = pipeline._vad_cut_only_chunks(
+            [
+                {"start": 7.106, "end": 9.694, "segments": [(7.106, 8.062), (9.122, 9.694)]},
+            ],
+            13.0,
+        )
+
+        self.assertEqual(
+            chunks,
+            [
+                {"start": 0.0, "end": 5.0, "segments": []},
+                {"start": 5.0, "end": 7.106, "segments": []},
+                {"start": 7.106, "end": 9.694, "segments": [(7.106, 8.062), (9.122, 9.694)]},
+                {"start": 9.694, "end": 13.0, "segments": []},
+            ],
+        )
+
+    def test_vad_cut_only_without_speech_returns_full_file_chunk(self):
+        fake_backend = mock.Mock()
+        with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
+            pipeline = MLXWhisperXPipeline(PipelineOptions(vad_cut_only=True))
+
+        self.assertEqual(
+            pipeline._vad_cut_only_chunks([], 12.5),
+            [{"start": 0.0, "end": 12.5, "segments": []}],
+        )
 
     def test_asr_without_vad_handles_shadowed_backend_transcribe_module(self):
         transcribe_func = mock.Mock(

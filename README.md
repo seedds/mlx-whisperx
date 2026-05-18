@@ -340,6 +340,7 @@ VAD options:
 - `--vad_model`: Hugging Face pyannote segmentation model used with `--vad_method pyannote`. Defaults to `pyannote/segmentation-3.0`.
 - `--chunk_size`: merged VAD chunk size in seconds.
 - `--no_vad`: transcribe the full file as one chunk.
+- `--vad_cut_only`: use VAD boundaries to cut the file without dropping non-speech regions.
 - `--clip_timestamps`: comma-separated clip start/end pairs in seconds. Requires `--no_vad`.
 - `--vad_dump_path`: write VAD chunks and settings to JSON.
 
@@ -423,6 +424,14 @@ mlx-whisperx audio.wav \
   --vad_method pyannote \
   --vad_model pyannote/segmentation-3.0 \
   --hf_token YOUR_HF_TOKEN \
+  --output_format json
+```
+
+Keep non-speech audio while still cutting at VAD boundaries:
+
+```bash
+mlx-whisperx audio.wav \
+  --vad_cut_only \
   --output_format json
 ```
 
