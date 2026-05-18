@@ -24,7 +24,7 @@ audio -> VAD -> mlx-whisper ASR -> forced alignment -> optional diarization -> w
 Default behavior:
 
 - ASR model: `mlx-community/whisper-turbo`
-- VAD backend: Silero
+- VAD backend: pyannote when available, otherwise Silero
 - Decoding: beam search with `beam_size=5` and `temperature=0`
 - Alignment: enabled for transcription
 - Diarization: disabled unless `--diarize` is passed
@@ -47,7 +47,7 @@ The published package constrains the alignment stack to a tested range:
 
 `torchvision` is not required for alignment.
 
-Install diarization support only when you need pyannote:
+Install diarization support when you want pyannote VAD and diarization instead of the automatic Silero fallback:
 
 ```bash
 python -m pip install -e ".[diarize]"
@@ -67,7 +67,7 @@ On macOS with Homebrew:
 brew install ffmpeg
 ```
 
-Optional pyannote VAD and diarization use pyannote models and may require a Hugging Face token, depending on the selected model.
+Pyannote VAD and diarization use pyannote models and may require a Hugging Face token, depending on the selected model.
 
 ## Usage
 
@@ -78,7 +78,7 @@ mlx-whisperx AUDIO [AUDIO ...] [OPTIONS]
 By default, `mlx-whisperx`:
 
 - uses `mlx-community/whisper-turbo`
-- runs Silero VAD
+- runs pyannote VAD when available, otherwise falls back to Silero
 - performs forced alignment for word timestamps
 - writes outputs to the current directory
 - writes every supported output format when `--output_format` is not specified
@@ -262,7 +262,6 @@ result = transcribe(
     temperature=0.0,
     no_align=False,
     diarize=False,
-    vad_method="silero",
 )
 ```
 
@@ -333,8 +332,9 @@ Precision and model-cache options:
 
 VAD options:
 
-- `--vad_method silero`: default VAD backend.
-- `--vad_method pyannote`: use pyannote VAD if your environment supports it.
+- `--vad_method auto`: default VAD mode. Prefer pyannote and fall back to Silero if pyannote cannot initialize.
+- `--vad_method pyannote`: require pyannote VAD and do not fall back.
+- `--vad_method silero`: use Silero VAD directly.
 - `--vad_onset`: VAD onset threshold.
 - `--vad_offset`: VAD offset threshold.
 - `--vad_model`: Hugging Face pyannote segmentation model used with `--vad_method pyannote`. Defaults to `pyannote/segmentation-3.0`.
@@ -344,7 +344,7 @@ VAD options:
 - `--clip_timestamps`: comma-separated clip start/end pairs in seconds. Requires `--no_vad`.
 - `--vad_dump_path`: write VAD chunks and settings to JSON.
 
-Silero VAD loads from the local Torch Hub cache first. To force a local Silero checkout, set:
+When the default auto mode falls back to Silero, or when you explicitly select `--vad_method silero`, Silero loads from the local Torch Hub cache first. To force a local Silero checkout, set:
 
 ```bash
 export MLX_WHISPERX_SILERO_VAD_PATH=/path/to/snakers4_silero-vad
@@ -417,7 +417,7 @@ Suppress numerals and currency symbols during decoding:
 mlx-whisperx audio.wav --suppress_numerals --output_format json
 ```
 
-Use pyannote VAD instead of the default Silero VAD:
+Require pyannote VAD instead of the default auto fallback behavior:
 
 ```bash
 mlx-whisperx audio.wav \
@@ -469,7 +469,7 @@ mlx-whisperx first.wav second.wav third.wav --output_dir transcripts --output_fo
 - `translate` skips forced alignment because alignment models are transcription-language specific.
 - Missing `torch`, `torchaudio`, or `transformers` still fail alignment by default; pass `--allow_missing_alignment_deps` to continue with ASR-only output instead.
 - `clip_timestamps` is only supported with `--no_vad` because VAD chunking changes the timing base before ASR runs.
-- Pyannote VAD and diarization depend on a compatible PyTorch, torchaudio, pyannote installation, and Hugging Face model access when the selected model is gated.
+- Pyannote VAD and diarization depend on a compatible PyTorch, torchaudio, pyannote installation, and Hugging Face model access when the selected model is gated. Without that stack, the default `--vad_method auto` path falls back to Silero VAD.
 - The vendored ASR backend lives under `mlx_whisperx.backend.mlx_whisper` so decoder behavior can be changed without modifying external reference repositories.
 
 ## Development Checks

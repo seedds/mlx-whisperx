@@ -27,7 +27,7 @@ from .alignment import AlignmentDependencyError, align, load_align_model
 from .audio import SAMPLE_RATE, audio_to_numpy, slice_audio
 from .diarize import DiarizationPipeline, assign_word_speakers
 from .log_utils import get_logger
-from .vads import get_vad_class
+from .vads import AUTO_VAD_METHOD, get_vad_class
 
 
 logger = get_logger(__name__)
@@ -67,8 +67,9 @@ class PipelineOptions:
     """Configuration for every stage of `MLXWhisperXPipeline`.
 
     The dataclass mostly mirrors CLI flags. Defaults are chosen to produce useful
-    WhisperX-like output on Apple Silicon while keeping diarization disabled unless
-    explicitly requested because it may require gated pyannote models.
+    WhisperX-like output on Apple Silicon while preferring pyannote VAD, falling
+    back to Silero when pyannote is unavailable, and keeping diarization disabled
+    unless explicitly requested because it may require gated pyannote models.
     """
 
     model: str = "mlx-community/whisper-turbo"
@@ -88,7 +89,7 @@ class PipelineOptions:
     compression_ratio_threshold: Optional[float] = 2.4
     logprob_threshold: Optional[float] = -1.0
     no_speech_threshold: Optional[float] = 0.6
-    vad_method: str = "silero"
+    vad_method: str = AUTO_VAD_METHOD
     vad_onset: float = 0.500
     vad_offset: float = 0.363
     vad_model: Optional[str] = None
@@ -228,25 +229,7 @@ class MLXWhisperXPipeline:
             self._dump_vad_chunks(chunks, duration)
             return chunks
 
-        VadClass = get_vad_class(self.options.vad_method)
-        if self.options.vad_method == "pyannote":
-            # Pyannote has a different constructor contract because it needs a Torch
-            # device, optional auth token, and model cache settings.
-            vad_model = VadClass(
-                self.options.device,
-                token=self.options.hf_token,
-                model_name=self.options.vad_model,
-                cache_dir=self.options.model_dir,
-                vad_onset=self.options.vad_onset,
-                vad_offset=self.options.vad_offset,
-                chunk_size=self.options.chunk_size,
-            )
-        else:
-            vad_model = VadClass(
-                vad_onset=self.options.vad_onset,
-                vad_offset=self.options.vad_offset,
-                chunk_size=self.options.chunk_size,
-            )
+        resolved_vad_method, vad_model = self._load_vad_model()
 
         if hasattr(vad_model, "preprocess_audio"):
             # Silero accepts NumPy directly; pyannote expects a Torch waveform. The
@@ -269,8 +252,40 @@ class MLXWhisperXPipeline:
         if self.options.vad_cut_only:
             chunks = self._vad_cut_only_chunks(chunks, duration)
         chunks = [chunk for chunk in chunks if chunk["end"] > chunk["start"]]
-        self._dump_vad_chunks(chunks, duration)
+        self._dump_vad_chunks(chunks, duration, resolved_vad_method=resolved_vad_method)
         return chunks
+
+    def _load_vad_model(self) -> tuple[str, object]:
+        """Instantiate the configured VAD backend, applying default fallback once."""
+        if self.options.vad_method != AUTO_VAD_METHOD:
+            return self.options.vad_method, self._build_vad_model(self.options.vad_method)
+
+        try:
+            return "pyannote", self._build_vad_model("pyannote")
+        except RuntimeError as exc:
+            logger.warning("Pyannote VAD unavailable; falling back to silero: %s", exc)
+            return "silero", self._build_vad_model("silero")
+
+    def _build_vad_model(self, vad_method: str):
+        """Create a concrete VAD backend instance for the requested backend name."""
+        VadClass = get_vad_class(vad_method)
+        if vad_method == "pyannote":
+            # Pyannote has a different constructor contract because it needs a Torch
+            # device, optional auth token, and model cache settings.
+            return VadClass(
+                self.options.device,
+                token=self.options.hf_token,
+                model_name=self.options.vad_model,
+                cache_dir=self.options.model_dir,
+                vad_onset=self.options.vad_onset,
+                vad_offset=self.options.vad_offset,
+                chunk_size=self.options.chunk_size,
+            )
+        return VadClass(
+            vad_onset=self.options.vad_onset,
+            vad_offset=self.options.vad_offset,
+            chunk_size=self.options.chunk_size,
+        )
 
     def _vad_cut_only_chunks(self, speech_chunks: list[dict], audio_duration: float) -> list[dict]:
         """Expand speech-only VAD chunks into full-timeline chunks cut at VAD boundaries."""
@@ -311,13 +326,20 @@ class MLXWhisperXPipeline:
 
         return chunks
 
-    def _dump_vad_chunks(self, chunks: list[dict], audio_duration: float) -> None:
+    def _dump_vad_chunks(
+        self,
+        chunks: list[dict],
+        audio_duration: float,
+        resolved_vad_method: Optional[str] = None,
+    ) -> None:
         """Write VAD diagnostics to JSON when requested by the caller."""
         if not self.options.vad_dump_path:
             return
 
         payload = {
-            "vad_method": self.options.vad_method,
+            "vad_method": resolved_vad_method or self.options.vad_method,
+            "requested_vad_method": self.options.vad_method,
+            "resolved_vad_method": resolved_vad_method,
             "vad_onset": self.options.vad_onset,
             "vad_offset": self.options.vad_offset,
             "vad_model": self.options.vad_model,

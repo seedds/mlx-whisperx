@@ -1,5 +1,8 @@
 """Voice activity detection backend selection."""
 
+
+AUTO_VAD_METHOD = "auto"
+
 def get_vad_class(vad_method: str):
     """Return the VAD implementation class for a CLI/API backend name.
 

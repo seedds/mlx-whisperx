@@ -14,6 +14,34 @@ class CLITests(unittest.TestCase):
         args = parser.parse_args(["audio.wav", "--language", "ENGLISH"])
         self.assertEqual(args.language, "en")
 
+    def test_main_defaults_to_auto_vad_method(self):
+        calls: list[dict] = []
+
+        def fake_transcribe(audio_path, **kwargs):
+            calls.append({"audio_path": audio_path, **kwargs})
+            return {"segments": [], "word_segments": [], "language": "en"}
+
+        writer = mock.Mock()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            argv = [
+                "mlx-whisperx",
+                "audio.wav",
+                "--output_dir",
+                tmpdir,
+                "--output_format",
+                "json",
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch("mlx_whisperx.cli.transcribe", side_effect=fake_transcribe),
+                mock.patch("mlx_whisperx.cli.get_writer", return_value=writer),
+            ):
+                cli.main()
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["vad_method"], "auto")
+        writer.assert_called_once()
+
     def test_clip_timestamps_requires_no_vad(self):
         argv = ["mlx-whisperx", "audio.wav", "--clip_timestamps", "0,5"]
         with mock.patch.object(sys, "argv", argv):

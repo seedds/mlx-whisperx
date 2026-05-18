@@ -11,6 +11,7 @@ import numpy as np
 from ._language import LANGUAGE_OPTION_HELP, normalize_language_settings, parse_language
 from .log_utils import setup_logging
 from .transcribe import transcribe
+from .vads import AUTO_VAD_METHOD
 from .writers import get_writer
 
 
@@ -57,7 +58,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow_missing_alignment_deps", action="store_true", help="Continue without forced alignment when torch, torchaudio, or transformers are unavailable")
     parser.add_argument("--return_char_alignments", action="store_true", help="Return character alignments in JSON")
 
-    parser.add_argument("--vad_method", default="silero", choices=["pyannote", "silero"], help="VAD backend")
+    parser.add_argument(
+        "--vad_method",
+        default=AUTO_VAD_METHOD,
+        choices=[AUTO_VAD_METHOD, "pyannote", "silero"],
+        help="VAD backend: auto prefers pyannote and falls back to silero",
+    )
     parser.add_argument("--vad_onset", type=float, default=0.500, help="VAD onset threshold")
     parser.add_argument("--vad_offset", type=float, default=0.363, help="VAD offset threshold")
     parser.add_argument("--vad_model", default=None, help="Hugging Face pyannote segmentation model used when --vad_method pyannote")

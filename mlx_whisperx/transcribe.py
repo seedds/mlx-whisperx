@@ -6,6 +6,7 @@ import numpy as np
 
 from ._language import normalize_language_settings
 from .pipeline import MLXWhisperXPipeline, PipelineOptions
+from .vads import AUTO_VAD_METHOD
 
 
 def transcribe(
@@ -28,7 +29,7 @@ def transcribe(
     compression_ratio_threshold: Optional[float] = 2.4,
     logprob_threshold: Optional[float] = -1.0,
     no_speech_threshold: Optional[float] = 0.6,
-    vad_method: str = "silero",
+    vad_method: str = AUTO_VAD_METHOD,
     vad_onset: float = 0.500,
     vad_offset: float = 0.363,
     vad_model: Optional[str] = None,

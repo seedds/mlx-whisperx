@@ -18,6 +18,64 @@ class PipelineTests(unittest.TestCase):
     def _write_config(self, directory: Path, n_vocab: int) -> None:
         (directory / "config.json").write_text(json.dumps({"n_vocab": n_vocab}), encoding="utf-8")
 
+    def test_auto_vad_falls_back_to_silero_when_pyannote_init_fails(self):
+        class FailingPyannote:
+            def __init__(self, *args, **kwargs):
+                raise RuntimeError("pyannote unavailable")
+
+        class FakeSilero:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            @staticmethod
+            def preprocess_audio(audio):
+                return audio
+
+            @staticmethod
+            def merge_chunks(segments, chunk_size: int, onset: float = 0.5, offset=None):
+                return [{"start": 0.0, "end": 0.5, "segments": [(0.0, 0.5)]}]
+
+            def __call__(self, audio, **kwargs):
+                return []
+
+        fake_backend = mock.Mock()
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend),
+            mock.patch(
+                "mlx_whisperx.pipeline.get_vad_class",
+                side_effect=lambda vad_method: {
+                    "pyannote": FailingPyannote,
+                    "silero": FakeSilero,
+                }[vad_method],
+            ),
+        ):
+            vad_dump_path = str(Path(tmpdir) / "vad.json")
+            pipeline = MLXWhisperXPipeline(PipelineOptions(vad_dump_path=vad_dump_path))
+            with self.assertLogs("mlx_whisperx.pipeline", level="WARNING") as logs:
+                chunks = pipeline._vad_chunks(np.zeros(16000, dtype=np.float32))
+            payload = json.loads(Path(vad_dump_path).read_text(encoding="utf-8"))
+
+        self.assertEqual(chunks, [{"start": 0.0, "end": 0.5, "segments": [(0.0, 0.5)]}])
+        self.assertIn("falling back to silero", logs.output[0])
+        self.assertEqual(payload["vad_method"], "silero")
+        self.assertEqual(payload["requested_vad_method"], "auto")
+        self.assertEqual(payload["resolved_vad_method"], "silero")
+
+    def test_explicit_pyannote_does_not_fall_back_to_silero(self):
+        class FailingPyannote:
+            def __init__(self, *args, **kwargs):
+                raise RuntimeError("pyannote unavailable")
+
+        fake_backend = mock.Mock()
+        with (
+            mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend),
+            mock.patch("mlx_whisperx.pipeline.get_vad_class", return_value=FailingPyannote),
+        ):
+            pipeline = MLXWhisperXPipeline(PipelineOptions(vad_method="pyannote"))
+            with self.assertRaisesRegex(RuntimeError, "pyannote unavailable"):
+                pipeline._vad_chunks(np.zeros(16000, dtype=np.float32))
+
     def test_pipeline_rejects_clip_timestamps_with_vad(self):
         fake_backend = mock.Mock()
         with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
