@@ -468,18 +468,93 @@ class MLXWhisperXPipeline:
         for idx, chunk in enumerate(vad_chunks):
             start = float(chunk["start"])
             end = float(chunk["end"])
-            chunk_audio = slice_audio(audio, start, end)
+            speech_segments = [
+                (float(seg_start) - start, float(seg_end) - start)
+                for seg_start, seg_end in chunk.get("segments", [])
+            ]
+            chunk_audio = self._speech_only_chunk_audio(audio, chunk)
             if chunk_audio.size == 0:
                 continue
 
             chunk_result = self._mlx_whisper.transcribe_chunk(chunk_audio, **chunk_kwargs)
-            chunk_segments = [chunk_result] if chunk_result.get("text", "").strip() else []
+            chunk_segments = []
+            if chunk_result.get("text", "").strip():
+                chunk_segments = [
+                    self._restore_vad_chunk_segment(chunk_result, speech_segments, end - start)
+                ]
             self._append_asr_segments(all_segments, chunk_segments, start, end)
 
             if self.options.print_progress:
                 print(f"Progress: {((idx + 1) / total) * 50:.2f}%...")
 
         return {"segments": all_segments, "language": language or "en"}
+
+    def _speech_only_chunk_audio(self, audio: np.ndarray, chunk: dict) -> np.ndarray:
+        """Concatenate only the voiced regions inside one VAD chunk."""
+        speech_segments = chunk.get("segments", [])
+        if not speech_segments:
+            return slice_audio(audio, float(chunk["start"]), float(chunk["end"]))
+
+        pieces = [
+            slice_audio(audio, float(seg_start), float(seg_end))
+            for seg_start, seg_end in speech_segments
+        ]
+        pieces = [piece for piece in pieces if piece.size > 0]
+        if not pieces:
+            return np.array([], dtype=np.float32)
+        return np.concatenate(pieces)
+
+    def _restore_vad_chunk_segment(
+        self,
+        segment: dict,
+        speech_segments: list[tuple[float, float]],
+        chunk_duration: float,
+    ) -> dict:
+        """Map compacted speech-only timestamps back onto the original chunk timeline."""
+        if not speech_segments:
+            return segment
+
+        restored = dict(segment)
+        restored["start"] = round(
+            self._restore_speech_time(float(segment.get("start", 0.0)), speech_segments, is_end=False),
+            3,
+        )
+        restored["end"] = round(
+            self._restore_speech_time(
+                float(segment.get("end", chunk_duration)),
+                speech_segments,
+                is_end=True,
+            ),
+            3,
+        )
+        return restored
+
+    def _restore_speech_time(
+        self,
+        time_in_speech: float,
+        speech_segments: list[tuple[float, float]],
+        *,
+        is_end: bool,
+    ) -> float:
+        """Convert compacted speech time to the equivalent time in the chunk timeline."""
+        if not speech_segments:
+            return time_in_speech
+
+        remaining = max(0.0, time_in_speech)
+        last_end = float(speech_segments[-1][1])
+        for index, (seg_start, seg_end) in enumerate(speech_segments):
+            seg_start = float(seg_start)
+            seg_end = float(seg_end)
+            duration = max(0.0, seg_end - seg_start)
+            if remaining < duration:
+                return seg_start + remaining
+            if abs(remaining - duration) <= 1e-9:
+                if is_end or index == len(speech_segments) - 1:
+                    return seg_end
+                return float(speech_segments[index + 1][0])
+            remaining -= duration
+
+        return last_end
 
     def _append_asr_segments(
         self,

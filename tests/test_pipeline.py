@@ -179,6 +179,62 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(fake_backend.transcribe_chunk.call_count, 2)
         fake_backend.transcribe.assert_not_called()
 
+    def test_asr_with_vad_compacts_inner_speech_segments_before_decoding(self):
+        fake_backend = mock.Mock()
+        fake_backend.detect_language.return_value = "en"
+        fake_backend.transcribe_chunk.return_value = {
+            "start": 0.0,
+            "end": 2.5,
+            "text": "hello world",
+            "avg_logprob": -0.1,
+        }
+        with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
+            pipeline = MLXWhisperXPipeline(PipelineOptions())
+
+        audio = np.arange(16000 * 6, dtype=np.float32)
+        pipeline._asr(
+            audio,
+            [
+                {
+                    "start": 1.0,
+                    "end": 4.5,
+                    "segments": [(1.0, 2.0), (3.0, 4.5)],
+                }
+            ],
+        )
+
+        chunk_audio = fake_backend.transcribe_chunk.call_args.args[0]
+        expected = np.concatenate([audio[16000:32000], audio[48000:72000]])
+        np.testing.assert_array_equal(chunk_audio, expected)
+
+    def test_asr_with_vad_restores_timestamps_across_internal_silence(self):
+        fake_backend = mock.Mock()
+        fake_backend.detect_language.return_value = "en"
+        fake_backend.transcribe_chunk.return_value = {
+            "start": 0.8,
+            "end": 1.2,
+            "text": "hello",
+            "avg_logprob": -0.1,
+        }
+        with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
+            pipeline = MLXWhisperXPipeline(PipelineOptions())
+
+        result = pipeline._asr(
+            np.zeros(16000 * 15, dtype=np.float32),
+            [
+                {
+                    "start": 10.0,
+                    "end": 13.5,
+                    "segments": [(10.0, 11.0), (12.0, 13.5)],
+                }
+            ],
+        )
+
+        self.assertEqual(
+            result["segments"],
+            [{"start": 10.8, "end": 12.2, "text": "hello", "avg_logprob": -0.1}],
+        )
+
     def test_pipeline_normalizes_language_for_direct_usage(self):
         fake_backend = mock.Mock()
         with tempfile.TemporaryDirectory() as tmpdir:
