@@ -133,6 +133,24 @@ def _decode_with_fallback(
     temperatures = [temperature] if isinstance(temperature, (int, float)) else temperature
     decode_result = None
 
+    def decode_once(kwargs: dict, temp: float) -> DecodingResult:
+        options = DecodingOptions(**kwargs, temperature=temp)
+        try:
+            return model.decode(segment, options)
+        except RuntimeError as exc:
+            if kwargs.get("beam_size") is None or "beam search produced 0 active beams" not in str(exc):
+                raise
+            warnings.warn(
+                "Beam search failed for one decode window; retrying with greedy decoding.",
+                RuntimeWarning,
+            )
+            fallback_kwargs = {**kwargs}
+            fallback_kwargs.pop("beam_size", None)
+            fallback_kwargs.pop("patience", None)
+            fallback_kwargs.pop("best_of", None)
+            fallback_options = DecodingOptions(**fallback_kwargs, temperature=temp)
+            return model.decode(segment, fallback_options)
+
     for t in temperatures:
         kwargs = {**decode_options}
         if t > 0:
@@ -141,8 +159,7 @@ def _decode_with_fallback(
         else:
             kwargs.pop("best_of", None)
 
-        options = DecodingOptions(**kwargs, temperature=t)
-        decode_result = model.decode(segment, options)
+        decode_result = decode_once(kwargs, t)
 
         needs_fallback = False
         if (
@@ -407,6 +424,24 @@ def transcribe(
         )
         decode_result = None
 
+        def decode_once(kwargs: dict, temp: float) -> DecodingResult:
+            options = DecodingOptions(**kwargs, temperature=temp)
+            try:
+                return model.decode(segment, options)
+            except RuntimeError as exc:
+                if kwargs.get("beam_size") is None or "beam search produced 0 active beams" not in str(exc):
+                    raise
+                warnings.warn(
+                    "Beam search failed for one decode window; retrying with greedy decoding.",
+                    RuntimeWarning,
+                )
+                fallback_kwargs = {**kwargs}
+                fallback_kwargs.pop("beam_size", None)
+                fallback_kwargs.pop("patience", None)
+                fallback_kwargs.pop("best_of", None)
+                fallback_options = DecodingOptions(**fallback_kwargs, temperature=temp)
+                return model.decode(segment, fallback_options)
+
         for t in temperatures:
             kwargs = {**decode_options}
             if t > 0:
@@ -417,8 +452,7 @@ def transcribe(
                 # disable best_of when t == 0
                 kwargs.pop("best_of", None)
 
-            options = DecodingOptions(**kwargs, temperature=t)
-            decode_result = model.decode(segment, options)
+            decode_result = decode_once(kwargs, t)
 
             needs_fallback = False
             if (
