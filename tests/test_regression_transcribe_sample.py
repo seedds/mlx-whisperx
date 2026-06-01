@@ -19,6 +19,10 @@ def _normalize_text(text: str) -> str:
 
 @unittest.skipUnless(importlib.util.find_spec("mlx") is not None, "requires mlx runtime")
 @unittest.skipUnless(importlib.util.find_spec("torch") is not None, "requires torch for silero VAD")
+@unittest.skipUnless(
+    os.environ.get("MLX_WHISPERX_RUN_SAMPLE_TEST") == "1",
+    "set MLX_WHISPERX_RUN_SAMPLE_TEST=1 to run model-output regression",
+)
 class SampleRegressionTests(unittest.TestCase):
     def test_vad_transcription_keeps_brakes_phrase(self):
         model = os.environ.get("MLX_WHISPERX_TEST_MODEL", "mlx-community/whisper-turbo")

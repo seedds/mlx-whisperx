@@ -128,6 +128,7 @@ def _decode_with_fallback(
     compression_ratio_threshold: Optional[float],
     logprob_threshold: Optional[float],
     decode_options: dict,
+    no_speech_threshold: Optional[float] = None,
 ) -> DecodingResult:
     """Decode one fixed chunk while preserving Whisper fallback heuristics."""
     temperatures = [temperature] if isinstance(temperature, (int, float)) else temperature
@@ -172,6 +173,13 @@ def _decode_with_fallback(
             and decode_result.avg_logprob < logprob_threshold
         ):
             needs_fallback = True
+        if (
+            no_speech_threshold is not None
+            and decode_result.no_speech_prob > no_speech_threshold
+        ):
+            # Silence is a valid outcome, not a reason to retry with a hotter
+            # temperature that may hallucinate text.
+            needs_fallback = False
         if not needs_fallback:
             break
 
@@ -417,66 +425,6 @@ def transcribe(
     if word_timestamps and task == "translate":
         warnings.warn("Word-level timestamps on translations may not be reliable.")
 
-    def decode_with_fallback(segment: mx.array) -> DecodingResult:
-        """Decode one Mel window, trying fallback temperatures on failure heuristics."""
-        temperatures = (
-            [temperature] if isinstance(temperature, (int, float)) else temperature
-        )
-        decode_result = None
-
-        def decode_once(kwargs: dict, temp: float) -> DecodingResult:
-            options = DecodingOptions(**kwargs, temperature=temp)
-            try:
-                return model.decode(segment, options)
-            except RuntimeError as exc:
-                if kwargs.get("beam_size") is None or "beam search produced 0 active beams" not in str(exc):
-                    raise
-                warnings.warn(
-                    "Beam search failed for one decode window; retrying with greedy decoding.",
-                    RuntimeWarning,
-                )
-                fallback_kwargs = {**kwargs}
-                fallback_kwargs.pop("beam_size", None)
-                fallback_kwargs.pop("patience", None)
-                fallback_kwargs.pop("best_of", None)
-                fallback_options = DecodingOptions(**fallback_kwargs, temperature=temp)
-                return model.decode(segment, fallback_options)
-
-        for t in temperatures:
-            kwargs = {**decode_options}
-            if t > 0:
-                # disable beam_size and patience when t > 0
-                kwargs.pop("beam_size", None)
-                kwargs.pop("patience", None)
-            else:
-                # disable best_of when t == 0
-                kwargs.pop("best_of", None)
-
-            decode_result = decode_once(kwargs, t)
-
-            needs_fallback = False
-            if (
-                compression_ratio_threshold is not None
-                and decode_result.compression_ratio > compression_ratio_threshold
-            ):
-                needs_fallback = True  # too repetitive
-            if (
-                logprob_threshold is not None
-                and decode_result.avg_logprob < logprob_threshold
-            ):
-                needs_fallback = True  # average log probability is too low
-            if (
-                no_speech_threshold is not None
-                and decode_result.no_speech_prob > no_speech_threshold
-            ):
-                # Silence is a valid outcome, not a reason to retry with a hotter
-                # temperature that may hallucinate text.
-                needs_fallback = False  # silence
-            if not needs_fallback:
-                break
-
-        return decode_result
-
     clip_idx = 0
     seek = seek_clips[clip_idx][0]
     input_stride = N_FRAMES // model.dims.n_audio_ctx  # mel frames per output token: 2
@@ -530,7 +478,15 @@ def transcribe(
                 mel_segment = pad_or_trim(mel_segment, N_FRAMES, axis=-2).astype(dtype)
 
                 decode_options["prompt"] = all_tokens[prompt_reset_since:]
-                result: DecodingResult = decode_with_fallback(mel_segment)
+                result: DecodingResult = _decode_with_fallback(
+                    model,
+                    mel_segment,
+                    temperature=temperature,
+                    compression_ratio_threshold=compression_ratio_threshold,
+                    logprob_threshold=logprob_threshold,
+                    decode_options=decode_options,
+                    no_speech_threshold=no_speech_threshold,
+                )
 
                 tokens = np.array(result.tokens)
 

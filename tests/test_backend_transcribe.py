@@ -7,6 +7,41 @@ from unittest import mock
 
 
 class BackendTranscribeTests(unittest.TestCase):
+    STUBBED_MODULES = [
+        "mlx",
+        "mlx.core",
+        "mlx_whisperx.backend.mlx_whisper.audio",
+        "mlx_whisperx.backend.mlx_whisper.decoding",
+        "mlx_whisperx.backend.mlx_whisper.languages",
+        "mlx_whisperx.backend.mlx_whisper.load_models",
+        "mlx_whisperx.backend.mlx_whisper.timing",
+        "mlx_whisperx.backend.mlx_whisper.tokenizer",
+        "mlx_whisperx.backend.mlx_whisper.transcribe",
+        "tqdm",
+    ]
+
+    def setUp(self):
+        self._original_modules = {
+            name: sys.modules.get(name)
+            for name in self.STUBBED_MODULES
+            if name in sys.modules
+        }
+
+    def tearDown(self):
+        for name in self.STUBBED_MODULES:
+            if name in self._original_modules:
+                sys.modules[name] = self._original_modules[name]
+                parent_name, _, attr = name.rpartition(".")
+                parent = sys.modules.get(parent_name)
+                if parent is not None:
+                    setattr(parent, attr, self._original_modules[name])
+            else:
+                sys.modules.pop(name, None)
+                parent_name, _, attr = name.rpartition(".")
+                parent = sys.modules.get(parent_name)
+                if parent is not None and attr in parent.__dict__:
+                    delattr(parent, attr)
+
     def _import_transcribe(self):
         mx_module = sys.modules.setdefault("mlx", types.ModuleType("mlx"))
         mx_core = sys.modules.setdefault("mlx.core", types.ModuleType("mlx.core"))
@@ -56,6 +91,7 @@ class BackendTranscribeTests(unittest.TestCase):
             types.ModuleType("mlx_whisperx.backend.mlx_whisper.languages"),
         )
         languages.LANGUAGES = {"en": "English"}
+        languages.TO_LANGUAGE_CODE = {"english": "en"}
 
         load_models = sys.modules.setdefault(
             "mlx_whisperx.backend.mlx_whisper.load_models",

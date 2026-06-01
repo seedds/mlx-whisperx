@@ -204,16 +204,10 @@ class MLXWhisperXPipeline:
 
         normalized = {
             "segments": normalized_segments,
-            "language": result.get("language") or self.options.language or "en",
             "word_segments": [
                 word for segment in normalized_segments for word in segment.get("words", [])
             ],
-        }
-        # Reconstruct the dict in canonical output order for stable JSON snapshots.
-        normalized = {
-            "segments": normalized["segments"],
-            "word_segments": normalized["word_segments"],
-            "language": normalized["language"],
+            "language": result.get("language") or self.options.language or "en",
         }
         if include_speakers and "speaker_embeddings" in result:
             normalized["speaker_embeddings"] = result["speaker_embeddings"]
@@ -377,15 +371,12 @@ class MLXWhisperXPipeline:
                 _find_numeral_symbol_tokens(self.options.language, self.options.task),
             )
 
-        language = self.options.language
-        all_segments: list[dict] = []
-        detected_language = language
-
         prompt = self.options.initial_prompt
         if self.options.hotwords:
             # The vendored backend accepts a single initial prompt string, so hotwords
             # are appended rather than passed through a separate API.
             prompt = f"{prompt or ''} {self.options.hotwords}".strip()
+        language = self.options.language
         decode_kwargs = {
             "language": language,
             "task": self.options.task,

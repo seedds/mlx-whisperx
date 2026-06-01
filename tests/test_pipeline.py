@@ -15,6 +15,39 @@ from mlx_whisperx.pipeline import MLXWhisperXPipeline, PipelineOptions
 
 
 class PipelineTests(unittest.TestCase):
+    STUBBED_MODULES = [
+        "huggingface_hub",
+        "mlx_whisperx.backend.mlx_whisper.load_models",
+        "mlx_whisperx.backend.mlx_whisper.tokenizer",
+        "mlx_whisperx.backend.mlx_whisper.transcribe",
+        "numba",
+        "scipy",
+        "tiktoken",
+        "tqdm",
+    ]
+
+    def setUp(self):
+        self._original_modules = {
+            name: sys.modules.get(name)
+            for name in self.STUBBED_MODULES
+            if name in sys.modules
+        }
+
+    def tearDown(self):
+        for name in self.STUBBED_MODULES:
+            if name in self._original_modules:
+                sys.modules[name] = self._original_modules[name]
+                parent_name, _, attr = name.rpartition(".")
+                parent = sys.modules.get(parent_name)
+                if parent is not None:
+                    setattr(parent, attr, self._original_modules[name])
+            else:
+                sys.modules.pop(name, None)
+                parent_name, _, attr = name.rpartition(".")
+                parent = sys.modules.get(parent_name)
+                if parent is not None and attr in parent.__dict__:
+                    delattr(parent, attr)
+
     def _write_config(self, directory: Path, n_vocab: int) -> None:
         (directory / "config.json").write_text(json.dumps({"n_vocab": n_vocab}), encoding="utf-8")
 
