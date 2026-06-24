@@ -3,8 +3,9 @@
 """Windowed Whisper transcription loop for the vendored MLX backend."""
 
 import sys
+import time
 import warnings
-from typing import List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 import mlx.core as mx
 import numpy as np
@@ -265,6 +266,253 @@ def transcribe_chunk(
         "no_speech_prob": result.no_speech_prob,
         "language": language,
     }
+
+
+def _needs_temperature_fallback(
+    result: DecodingResult,
+    *,
+    compression_ratio_threshold: Optional[float],
+    logprob_threshold: Optional[float],
+    no_speech_threshold: Optional[float],
+) -> bool:
+    """Apply the per-window fallback heuristics used by `_decode_with_fallback`."""
+    needs_fallback = False
+    if (
+        compression_ratio_threshold is not None
+        and result.compression_ratio > compression_ratio_threshold
+    ):
+        needs_fallback = True
+    if logprob_threshold is not None and result.avg_logprob < logprob_threshold:
+        needs_fallback = True
+    if no_speech_threshold is not None and result.no_speech_prob > no_speech_threshold:
+        # Silence is a valid outcome, not a reason to retry with a hotter temperature.
+        needs_fallback = False
+    return needs_fallback
+
+
+def _decode_batch_once(model, mels: mx.array, kwargs: dict, temp: float) -> List[DecodingResult]:
+    """Decode a stacked batch of Mel windows at a single temperature."""
+    options = DecodingOptions(**kwargs, temperature=temp)
+    try:
+        results = model.decode(mels, options)
+    except RuntimeError as exc:
+        if kwargs.get("beam_size") is None or "beam search produced 0 active beams" not in str(exc):
+            raise
+        warnings.warn(
+            "Beam search failed for a decode batch; retrying with greedy decoding.",
+            RuntimeWarning,
+        )
+        fallback_kwargs = {**kwargs}
+        fallback_kwargs.pop("beam_size", None)
+        fallback_kwargs.pop("patience", None)
+        fallback_kwargs.pop("best_of", None)
+        fallback_options = DecodingOptions(**fallback_kwargs, temperature=temp)
+        results = model.decode(mels, fallback_options)
+    # `model.decode` returns a single result for a one-window batch.
+    if isinstance(results, DecodingResult):
+        return [results]
+    return list(results)
+
+
+def _decode_batch_with_fallback(
+    model,
+    mels: mx.array,
+    *,
+    temperature: Union[float, Tuple[float, ...]],
+    compression_ratio_threshold: Optional[float],
+    logprob_threshold: Optional[float],
+    no_speech_threshold: Optional[float],
+    decode_options: dict,
+) -> List[DecodingResult]:
+    """Decode a batch of Mel windows, re-batching only the windows that fail thresholds.
+
+    This mirrors `_decode_with_fallback` but evaluates the fallback heuristics per window
+    so a single hot-temperature retry does not penalize windows that already decoded well.
+    """
+    temperatures = [temperature] if isinstance(temperature, (int, float)) else list(temperature)
+    n = int(mels.shape[0])
+    results: List[Optional[DecodingResult]] = [None] * n
+    pending = list(range(n))
+
+    for t in temperatures:
+        if not pending:
+            break
+        kwargs = {**decode_options}
+        if t > 0:
+            kwargs.pop("beam_size", None)
+            kwargs.pop("patience", None)
+        else:
+            kwargs.pop("best_of", None)
+
+        sub_mels = mx.stack([mels[i] for i in pending])
+        sub_results = _decode_batch_once(model, sub_mels, kwargs, t)
+
+        still_pending: List[int] = []
+        for local_index, original_index in enumerate(pending):
+            decode_result = sub_results[local_index]
+            results[original_index] = decode_result
+            if _needs_temperature_fallback(
+                decode_result,
+                compression_ratio_threshold=compression_ratio_threshold,
+                logprob_threshold=logprob_threshold,
+                no_speech_threshold=no_speech_threshold,
+            ):
+                still_pending.append(original_index)
+        pending = still_pending
+
+    return [result for result in results if result is not None]
+
+
+def transcribe_chunks_batched(
+    audio_list: List[Union[np.ndarray, mx.array]],
+    *,
+    path_or_hf_repo: str = "mlx-community/whisper-tiny",
+    model_dir: Optional[str] = None,
+    model_cache_only: bool = False,
+    batch_size: int = 8,
+    word_timestamps: bool = False,
+    temperature: Union[float, Tuple[float, ...]] = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+    compression_ratio_threshold: Optional[float] = 2.4,
+    logprob_threshold: Optional[float] = -1.0,
+    no_speech_threshold: Optional[float] = 0.6,
+    initial_prompt: Optional[str] = None,
+    prepend_punctuations: str = "\"'“¿([{-",
+    append_punctuations: str = "\"'.。,，!！?？:：”)]}、",
+    progress_callback: Optional[Callable[[dict], None]] = None,
+    **decode_options,
+) -> List[dict]:
+    """Decode many independent chunks in batches, one decode pass per group.
+
+    Each chunk is decoded as a self-contained 30-second window. Decoding is grouped into
+    batches of `batch_size` so the encoder/decoder run on multiple windows at once, which
+    is the main speed advantage over decoding chunks serially. `language` must be supplied
+    in `decode_options`; batched decoding does not run per-window language detection.
+
+    `progress_callback`, if given, is invoked once per decoded batch with a dict of timing
+    and counts so callers can render a live progress log.
+    """
+    if not audio_list:
+        return []
+
+    dtype = mx.float16 if decode_options.get("fp16", True) else mx.float32
+    model = ModelHolder.get_model(
+        path_or_hf_repo,
+        dtype,
+        model_dir=model_dir,
+        model_cache_only=model_cache_only,
+    )
+
+    language = decode_options.get("language")
+    if language is None:
+        if model.is_multilingual:
+            raise ValueError("transcribe_chunks_batched requires an explicit language")
+        language = "en"
+    task: str = decode_options.get("task", "transcribe")
+    tokenizer = get_tokenizer(
+        model.is_multilingual,
+        num_languages=model.num_languages,
+        language=language,
+        task=task,
+    )
+
+    decode_kwargs = {**decode_options, "language": language}
+    if initial_prompt is not None:
+        decode_kwargs["prompt"] = initial_prompt
+
+    mels: List[mx.array] = []
+    durations: List[float] = []
+    for audio in audio_list:
+        audio = _audio_to_mx(audio)
+        durations.append(float(audio.shape[0] / SAMPLE_RATE))
+        mel = log_mel_spectrogram(audio, n_mels=model.dims.n_mels)
+        mel = pad_or_trim(mel, N_FRAMES, axis=-2).astype(dtype)
+        mels.append(mel)
+
+    total_windows = len(mels)
+    total_batches = (total_windows + max(1, batch_size) - 1) // max(1, batch_size)
+    results: List[dict] = []
+    for batch_index, batch_start in enumerate(range(0, len(mels), max(1, batch_size))):
+        batch_mels = mels[batch_start : batch_start + max(1, batch_size)]
+        stacked = mx.stack(batch_mels)
+
+        decode_start = time.perf_counter()
+        decode_results = _decode_batch_with_fallback(
+            model,
+            stacked,
+            temperature=temperature,
+            compression_ratio_threshold=compression_ratio_threshold,
+            logprob_threshold=logprob_threshold,
+            no_speech_threshold=no_speech_threshold,
+            decode_options=decode_kwargs,
+        )
+        # MLX is lazy; force evaluation so the reported decode time is real GPU work and
+        # not deferred into the word-timestamp or text-decoding step below.
+        mx.eval([result.tokens for result in decode_results])
+        decode_seconds = time.perf_counter() - decode_start
+
+        words_start = time.perf_counter()
+        for offset, result in enumerate(decode_results):
+            chunk_index = batch_start + offset
+            duration = durations[chunk_index]
+            tokens = np.array(result.tokens)
+            text_tokens = [token for token in tokens.tolist() if token < tokenizer.eot]
+            text = tokenizer.decode(text_tokens)
+            chunk_result = {
+                "start": 0.0,
+                "end": duration,
+                "text": text,
+                "tokens": tokens.tolist(),
+                "avg_logprob": result.avg_logprob,
+                "compression_ratio": result.compression_ratio,
+                "no_speech_prob": result.no_speech_prob,
+                "language": language,
+            }
+
+            if word_timestamps and text.strip():
+                # Word timings come from cross-attention DTW on this single window. The
+                # segment uses seek=0 because each window starts at its own time base;
+                # callers offset word times to absolute file time.
+                segment = {
+                    "seek": 0,
+                    "start": 0.0,
+                    "end": duration,
+                    "tokens": tokens.tolist(),
+                }
+                add_word_timestamps(
+                    segments=[segment],
+                    model=model,
+                    tokenizer=tokenizer,
+                    mel=batch_mels[offset],
+                    num_frames=N_FRAMES,
+                    prepend_punctuations=prepend_punctuations,
+                    append_punctuations=append_punctuations,
+                    last_speech_timestamp=0.0,
+                )
+                chunk_result["words"] = segment.get("words", [])
+
+            results.append(chunk_result)
+
+        words_seconds = time.perf_counter() - words_start
+        if progress_callback is not None:
+            windows_done = batch_start + len(batch_mels)
+            audio_seconds = sum(durations[batch_start:windows_done])
+            batch_seconds = decode_seconds + words_seconds
+            progress_callback(
+                {
+                    "batch_index": batch_index,
+                    "total_batches": total_batches,
+                    "windows_done": windows_done,
+                    "total_windows": total_windows,
+                    "batch_windows": len(batch_mels),
+                    "decode_seconds": decode_seconds,
+                    "words_seconds": words_seconds,
+                    "batch_seconds": batch_seconds,
+                    "audio_seconds": audio_seconds,
+                    "realtime_factor": (audio_seconds / batch_seconds) if batch_seconds > 0 else 0.0,
+                }
+            )
+
+    return results
 
 
 def transcribe(

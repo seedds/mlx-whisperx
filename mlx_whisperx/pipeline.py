@@ -67,9 +67,9 @@ class PipelineOptions:
     """Configuration for every stage of `MLXWhisperXPipeline`.
 
     The dataclass mostly mirrors CLI flags. Defaults are chosen to produce useful
-    WhisperX-like output on Apple Silicon while preferring pyannote VAD, falling
-    back to Silero when pyannote is unavailable, and keeping diarization disabled
-    unless explicitly requested because it may require gated pyannote models.
+    WhisperX-like output on Apple Silicon while using Silero VAD by default and
+    keeping diarization disabled unless explicitly requested because it may
+    require gated pyannote models.
     """
 
     model: str = "mlx-community/whisper-turbo"
@@ -77,7 +77,7 @@ class PipelineOptions:
     language: Optional[str] = None
     temperature: float | Sequence[float] = 0.0
     best_of: Optional[int] = 5
-    beam_size: Optional[int] = 5
+    beam_size: Optional[int] = 1
     patience: Optional[float] = 1.0
     length_penalty: Optional[float] = 1.0
     suppress_tokens: str = "-1"
@@ -89,13 +89,13 @@ class PipelineOptions:
     compression_ratio_threshold: Optional[float] = 2.4
     logprob_threshold: Optional[float] = -1.0
     no_speech_threshold: Optional[float] = 0.6
-    vad_method: str = AUTO_VAD_METHOD
+    vad_method: str = "silero"
     vad_onset: float = 0.500
     vad_offset: float = 0.363
     vad_model: Optional[str] = None
     chunk_size: int = 30
     no_vad: bool = False
-    vad_cut_only: bool = False
+    batch_size: int = 8
     align_model: Optional[str] = None
     no_align: bool = False
     allow_missing_alignment_deps: bool = False
@@ -243,8 +243,6 @@ class MLXWhisperXPipeline:
             onset=self.options.vad_onset,
             offset=self.options.vad_offset,
         )
-        if self.options.vad_cut_only:
-            chunks = self._vad_cut_only_chunks(chunks, duration)
         chunks = [chunk for chunk in chunks if chunk["end"] > chunk["start"]]
         self._dump_vad_chunks(chunks, duration, resolved_vad_method=resolved_vad_method)
         return chunks
@@ -281,45 +279,6 @@ class MLXWhisperXPipeline:
             chunk_size=self.options.chunk_size,
         )
 
-    def _vad_cut_only_chunks(self, speech_chunks: list[dict], audio_duration: float) -> list[dict]:
-        """Expand speech-only VAD chunks into full-timeline chunks cut at VAD boundaries."""
-        if audio_duration <= 0:
-            return []
-        if not speech_chunks:
-            return [{"start": 0.0, "end": audio_duration, "segments": []}]
-
-        boundaries = {0.0, audio_duration}
-        speech_segments: list[tuple[float, float]] = []
-        for chunk in speech_chunks:
-            start = max(0.0, float(chunk["start"]))
-            end = min(audio_duration, float(chunk["end"]))
-            if end <= start:
-                continue
-            boundaries.add(start)
-            boundaries.add(end)
-            for seg_start, seg_end in chunk.get("segments", []):
-                clipped_start = max(start, float(seg_start))
-                clipped_end = min(end, float(seg_end))
-                if clipped_end > clipped_start:
-                    speech_segments.append((clipped_start, clipped_end))
-
-        chunks: list[dict] = []
-        sorted_boundaries = sorted(boundaries)
-        max_chunk = float(self.options.chunk_size)
-        for boundary_start, boundary_end in zip(sorted_boundaries, sorted_boundaries[1:]):
-            cursor = boundary_start
-            while cursor < boundary_end:
-                chunk_end = boundary_end if max_chunk <= 0 else min(boundary_end, cursor + max_chunk)
-                chunk_segments = []
-                for seg_start, seg_end in speech_segments:
-                    if seg_end <= cursor or seg_start >= chunk_end:
-                        continue
-                    chunk_segments.append((max(cursor, seg_start), min(chunk_end, seg_end)))
-                chunks.append({"start": cursor, "end": chunk_end, "segments": chunk_segments})
-                cursor = chunk_end
-
-        return chunks
-
     def _dump_vad_chunks(
         self,
         chunks: list[dict],
@@ -339,7 +298,6 @@ class MLXWhisperXPipeline:
             "vad_model": self.options.vad_model,
             "chunk_size": self.options.chunk_size,
             "no_vad": self.options.no_vad,
-            "vad_cut_only": self.options.vad_cut_only,
             "audio_duration": round(audio_duration, 3),
             "chunk_count": len(chunks),
             "chunks": [
@@ -361,8 +319,8 @@ class MLXWhisperXPipeline:
         with output_path.open("w", encoding="utf-8") as file:
             json.dump(payload, file, ensure_ascii=False, indent=2)
 
-    def _asr(self, audio: np.ndarray, vad_chunks: list[dict]) -> dict:
-        """Transcribe each VAD chunk and restore chunk-local timestamps to file time."""
+    def _build_asr_kwargs(self, *, without_timestamps: bool) -> dict:
+        """Assemble backend decode kwargs shared by the VAD and window ASR paths."""
         suppress_tokens: str | list[int] = self.options.suppress_tokens
         if self.options.suppress_numerals:
             logger.info("Suppressing numeral and symbol tokens")
@@ -386,11 +344,7 @@ class MLXWhisperXPipeline:
             "length_penalty": self.options.length_penalty,
             "suppress_tokens": suppress_tokens,
             "fp16": self.options.fp16,
-            # VAD chunk decoding does not need backend timestamp tokens because forced
-            # alignment will refine the chunk text later. Full-file no-VAD decoding
-            # needs backend segment timestamps so alignment/subtitle timing is anchored
-            # to tighter spans instead of whole 30-second windows.
-            "without_timestamps": not (self.options.no_vad or self.options.vad_cut_only),
+            "without_timestamps": without_timestamps,
         }
         # None-valued options should fall back to backend defaults rather than
         # overriding them with null values.
@@ -400,7 +354,7 @@ class MLXWhisperXPipeline:
             # The full-file backend seek loop can run for a long time with no outer
             # chunk boundaries, so enable the backend progress bar in no-VAD mode.
             backend_verbose = False
-        asr_kwargs = {
+        return {
             "path_or_hf_repo": self.options.model,
             "model_dir": self.options.model_dir,
             "model_cache_only": self.options.model_cache_only,
@@ -412,7 +366,15 @@ class MLXWhisperXPipeline:
             **decode_kwargs,
         }
 
-        if self.options.no_vad or self.options.vad_cut_only:
+    def _asr(self, audio: np.ndarray, vad_chunks: list[dict]) -> dict:
+        """Transcribe each VAD chunk and restore chunk-local timestamps to file time."""
+        # VAD chunk decoding does not need backend timestamp tokens because forced
+        # alignment will refine the chunk text later. Full-file no-VAD decoding needs
+        # backend segment timestamps so alignment/subtitle timing is anchored to tighter
+        # spans instead of whole 30-second windows.
+        asr_kwargs = self._build_asr_kwargs(without_timestamps=not self.options.no_vad)
+
+        if self.options.no_vad:
             return self._asr_without_vad(audio, vad_chunks, asr_kwargs)
         return self._asr_with_vad(audio, vad_chunks, asr_kwargs)
 
@@ -476,8 +438,14 @@ class MLXWhisperXPipeline:
                 fp16=self.options.fp16,
             )
 
-        total = len(vad_chunks)
         chunk_kwargs = {**asr_kwargs, "language": language}
+
+        # Batching decodes multiple independent VAD chunks in one pass. It is only valid
+        # when chunks do not depend on each other, so cross-chunk prompting disables it.
+        if self.options.batch_size > 1 and not self.options.condition_on_previous_text:
+            return self._asr_with_vad_batched(audio, vad_chunks, chunk_kwargs, language)
+
+        total = len(vad_chunks)
         for idx, chunk in enumerate(vad_chunks):
             start = float(chunk["start"])
             end = float(chunk["end"])
@@ -501,6 +469,86 @@ class MLXWhisperXPipeline:
                 print(f"Progress: {((idx + 1) / total) * 50:.2f}%...")
 
         return {"segments": all_segments, "language": language or "en"}
+
+    def _asr_with_vad_batched(
+        self,
+        audio: np.ndarray,
+        vad_chunks: list[dict],
+        chunk_kwargs: dict,
+        language: Optional[str],
+    ) -> dict:
+        """Decode VAD chunks in batches and restore chunk-local timestamps to file time."""
+        all_segments: list[dict] = []
+
+        prepared: list[dict] = []
+        audio_list: list[np.ndarray] = []
+        for chunk in vad_chunks:
+            start = float(chunk["start"])
+            end = float(chunk["end"])
+            chunk_audio = self._speech_only_chunk_audio(audio, chunk)
+            if chunk_audio.size == 0:
+                continue
+            speech_segments = [
+                (float(seg_start) - start, float(seg_end) - start)
+                for seg_start, seg_end in chunk.get("segments", [])
+            ]
+            prepared.append({"start": start, "end": end, "speech_segments": speech_segments})
+            audio_list.append(chunk_audio)
+
+        if not audio_list:
+            return {"segments": all_segments, "language": language or "en"}
+
+        logger.info(
+            "VAD ASR: %d chunks, batch_size=%d", len(audio_list), self.options.batch_size
+        )
+        # transcribe_chunk accepts `verbose`, the batched entry point does not.
+        batched_kwargs = {key: value for key, value in chunk_kwargs.items() if key != "verbose"}
+        chunk_results = self._mlx_whisper.transcribe_chunks_batched(
+            audio_list,
+            batch_size=self.options.batch_size,
+            progress_callback=self._make_batch_progress_callback("VAD ASR"),
+            **batched_kwargs,
+        )
+
+        total = len(chunk_results)
+        for idx, (meta, chunk_result) in enumerate(zip(prepared, chunk_results)):
+            chunk_segments = []
+            if chunk_result.get("text", "").strip():
+                chunk_segments = [
+                    self._restore_vad_chunk_segment(
+                        chunk_result,
+                        meta["speech_segments"],
+                        meta["end"] - meta["start"],
+                    )
+                ]
+            self._append_asr_segments(all_segments, chunk_segments, meta["start"], meta["end"])
+
+            if self.options.print_progress:
+                print(f"Progress: {((idx + 1) / total) * 50:.2f}%...")
+
+        return {"segments": all_segments, "language": language or "en"}
+
+    def _make_batch_progress_callback(self, stage: str):
+        """Build a callback that logs per-batch decode timing and throughput."""
+        if not (self.options.print_progress or self.options.verbose):
+            return None
+
+        def _callback(info: dict) -> None:
+            pct = (info["windows_done"] / info["total_windows"] * 100) if info["total_windows"] else 0.0
+            logger.info(
+                "%s: batch %d/%d | %d/%d windows (%.1f%%) | decode %.2fs, words %.2fs | %.1fx realtime",
+                stage,
+                info["batch_index"] + 1,
+                info["total_batches"],
+                info["windows_done"],
+                info["total_windows"],
+                pct,
+                info["decode_seconds"],
+                info["words_seconds"],
+                info["realtime_factor"],
+            )
+
+        return _callback
 
     def _speech_only_chunk_audio(self, audio: np.ndarray, chunk: dict) -> np.ndarray:
         """Concatenate only the voiced regions inside one VAD chunk."""

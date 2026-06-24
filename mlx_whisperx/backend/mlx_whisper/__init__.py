@@ -33,6 +33,13 @@ def transcribe_chunk(*args, **kwargs):
     return _transcribe_chunk(*args, **kwargs)
 
 
+def transcribe_chunks_batched(*args, **kwargs):
+    """Lazy wrapper for batched multi-chunk decoding."""
+    from .transcribe import transcribe_chunks_batched as _transcribe_chunks_batched
+
+    return _transcribe_chunks_batched(*args, **kwargs)
+
+
 def __getattr__(name: str):
     """Lazily expose backend modules without importing tokenizer dependencies early."""
     if name in {"audio", "decoding", "languages", "load_models"}:
@@ -49,4 +56,5 @@ __all__ = [
     "load_models",
     "transcribe",
     "transcribe_chunk",
+    "transcribe_chunks_batched",
 ]

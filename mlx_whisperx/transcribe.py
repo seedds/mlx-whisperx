@@ -6,9 +6,6 @@ import numpy as np
 
 from ._language import normalize_language_settings
 from .pipeline import MLXWhisperXPipeline, PipelineOptions
-from .vads import AUTO_VAD_METHOD
-
-
 def transcribe(
     audio: str | np.ndarray,
     *,
@@ -17,7 +14,7 @@ def transcribe(
     language: Optional[str] = None,
     temperature: float | Sequence[float] = 0.0,
     best_of: Optional[int] = 5,
-    beam_size: Optional[int] = 5,
+    beam_size: Optional[int] = 1,
     patience: Optional[float] = 1.0,
     length_penalty: Optional[float] = 1.0,
     suppress_tokens: str = "-1",
@@ -29,13 +26,13 @@ def transcribe(
     compression_ratio_threshold: Optional[float] = 2.4,
     logprob_threshold: Optional[float] = -1.0,
     no_speech_threshold: Optional[float] = 0.6,
-    vad_method: str = AUTO_VAD_METHOD,
+    vad_method: str = "silero",
     vad_onset: float = 0.500,
     vad_offset: float = 0.363,
     vad_model: Optional[str] = None,
     chunk_size: int = 30,
     no_vad: bool = False,
-    vad_cut_only: bool = False,
+    batch_size: int = 8,
     vad_dump_path: Optional[str] = None,
     align_model: Optional[str] = None,
     no_align: bool = False,

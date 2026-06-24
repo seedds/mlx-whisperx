@@ -14,7 +14,7 @@ class CLITests(unittest.TestCase):
         args = parser.parse_args(["audio.wav", "--language", "ENGLISH"])
         self.assertEqual(args.language, "en")
 
-    def test_main_defaults_to_auto_vad_method(self):
+    def test_main_defaults_to_silero_vad_method(self):
         calls: list[dict] = []
 
         def fake_transcribe(audio_path, **kwargs):
@@ -39,7 +39,7 @@ class CLITests(unittest.TestCase):
                 cli.main()
 
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]["vad_method"], "auto")
+        self.assertEqual(calls[0]["vad_method"], "silero")
         writer.assert_called_once()
 
     def test_clip_timestamps_requires_no_vad(self):
@@ -155,33 +155,4 @@ class CLITests(unittest.TestCase):
 
         self.assertEqual(len(calls), 1)
         self.assertTrue(calls[0]["allow_missing_alignment_deps"])
-        writer.assert_called_once()
-
-    def test_main_forwards_vad_cut_only(self):
-        calls: list[dict] = []
-
-        def fake_transcribe(audio_path, **kwargs):
-            calls.append({"audio_path": audio_path, **kwargs})
-            return {"segments": [], "word_segments": [], "language": "en"}
-
-        writer = mock.Mock()
-        with tempfile.TemporaryDirectory() as tmpdir:
-            argv = [
-                "mlx-whisperx",
-                "audio.wav",
-                "--vad_cut_only",
-                "--output_dir",
-                tmpdir,
-                "--output_format",
-                "json",
-            ]
-            with (
-                mock.patch.object(sys, "argv", argv),
-                mock.patch("mlx_whisperx.cli.transcribe", side_effect=fake_transcribe),
-                mock.patch("mlx_whisperx.cli.get_writer", return_value=writer),
-            ):
-                cli.main()
-
-        self.assertEqual(len(calls), 1)
-        self.assertTrue(calls[0]["vad_cut_only"])
         writer.assert_called_once()

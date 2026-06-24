@@ -60,18 +60,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--vad_method",
-        default=AUTO_VAD_METHOD,
+        default="silero",
         choices=[AUTO_VAD_METHOD, "pyannote", "silero"],
-        help="VAD backend: auto prefers pyannote and falls back to silero",
+        help="VAD backend: silero by default; auto prefers pyannote and falls back to silero",
     )
     parser.add_argument("--vad_onset", type=float, default=0.500, help="VAD onset threshold")
     parser.add_argument("--vad_offset", type=float, default=0.363, help="VAD offset threshold")
     parser.add_argument("--vad_model", default=None, help="Hugging Face pyannote segmentation model used when --vad_method pyannote")
     parser.add_argument("--chunk_size", type=int, default=30, help="Merged VAD chunk size in seconds")
     parser.add_argument("--no_vad", action="store_true", help="Skip VAD and transcribe the full file as one chunk")
-    parser.add_argument("--vad_cut_only", action="store_true", help="Use VAD boundaries to cut the file without dropping non-speech regions")
     parser.add_argument("--clip_timestamps", default=None, help="Comma-separated start,end,start,end,... timestamps in seconds. Requires --no_vad.")
     parser.add_argument("--vad_dump_path", default=None, help="Write VAD chunks and settings to this JSON path")
+    parser.add_argument("--batch_size", type=int, default=8, help="Number of chunks decoded together; 1 disables batching")
 
     parser.add_argument("--diarize", action="store_true", help="Assign speaker labels")
     parser.add_argument("--min_speakers", default=None, type=int, help="Minimum number of speakers")
@@ -83,7 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature")
     parser.add_argument("--temperature_increment_on_fallback", type=optional_float, default=None, help="Temperature fallback increment")
     parser.add_argument("--best_of", type=optional_int, default=5, help="Number of candidates when sampling with temperature > 0; ignored at temperature 0")
-    parser.add_argument("--beam_size", type=optional_int, default=5, help="Beam size when temperature is zero")
+    parser.add_argument("--beam_size", type=optional_int, default=1, help="Beam size when temperature is zero")
     parser.add_argument("--patience", type=optional_float, default=1.0, help="Beam-search patience")
     parser.add_argument("--length_penalty", type=optional_float, default=1.0, help="Length penalty")
     parser.add_argument("--suppress_tokens", default="-1", help="Comma-separated token IDs to suppress")

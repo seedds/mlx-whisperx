@@ -23,8 +23,9 @@ audio -> VAD -> mlx-whisper ASR -> forced alignment -> optional diarization -> w
 
 Default behavior:
 
-- ASR model: `mlx-community/whisper-turbo`
+- ASR model: `mlx-community/whisper-large-v3-mlx`
 - VAD backend: pyannote when available, otherwise Silero
+- Chunking: VAD chunks decoded in batches of 8 (`--batch_size 8`)
 - Decoding: beam search with `beam_size=5` and `temperature=0`
 - Alignment: enabled for transcription
 - Diarization: disabled unless `--diarize` is passed
@@ -77,8 +78,8 @@ mlx-whisperx AUDIO [AUDIO ...] [OPTIONS]
 
 By default, `mlx-whisperx`:
 
-- uses `mlx-community/whisper-turbo`
-- runs pyannote VAD when available, otherwise falls back to Silero
+- uses `mlx-community/whisper-large-v3-mlx`
+- runs Silero VAD by default
 - performs forced alignment for word timestamps
 - writes outputs to the current directory
 - writes every supported output format when `--output_format` is not specified
@@ -163,7 +164,7 @@ Complete example with optional parameters:
 
 ```bash
 mlx-whisperx audio.wav \
-  --model mlx-community/whisper-large-v3-turbo \
+  --model mlx-community/whisper-large-v3-mlx \
   --model_dir ./models \
   --model_cache_only False \
   --device cpu \
@@ -225,7 +226,7 @@ from mlx_whisperx import transcribe
 
 result = transcribe(
     "audio.wav",
-    model="mlx-community/whisper-large-v3-turbo",
+    model="mlx-community/whisper-large-v3-mlx",
     language="en",
 )
 ```
@@ -256,7 +257,7 @@ Common API options match the CLI names:
 ```python
 result = transcribe(
     "audio.wav",
-    model="mlx-community/whisper-turbo",
+    model="mlx-community/whisper-large-v3-mlx",
     language="en",
     beam_size=5,
     temperature=0.0,
@@ -332,7 +333,8 @@ Precision and model-cache options:
 
 VAD options:
 
-- `--vad_method auto`: default VAD mode. Prefer pyannote and fall back to Silero if pyannote cannot initialize.
+- `--vad_method silero`: default VAD mode.
+- `--vad_method auto`: prefer pyannote and fall back to Silero if pyannote cannot initialize.
 - `--vad_method pyannote`: require pyannote VAD and do not fall back.
 - `--vad_method silero`: use Silero VAD directly.
 - `--vad_onset`: VAD onset threshold.
@@ -340,11 +342,14 @@ VAD options:
 - `--vad_model`: Hugging Face pyannote segmentation model used with `--vad_method pyannote`. Defaults to `pyannote/segmentation-3.0`.
 - `--chunk_size`: merged VAD chunk size in seconds.
 - `--no_vad`: transcribe the full file as one chunk.
-- `--vad_cut_only`: use VAD boundaries to cut the file without dropping non-speech regions.
 - `--clip_timestamps`: comma-separated clip start/end pairs in seconds. Requires `--no_vad`.
 - `--vad_dump_path`: write VAD chunks and settings to JSON.
 
-When the default auto mode falls back to Silero, or when you explicitly select `--vad_method silero`, Silero loads from the local Torch Hub cache first. To force a local Silero checkout, set:
+Batching options:
+
+- `--batch_size`: number of chunks decoded together in one pass. Defaults to `8`. Higher values are faster but use more memory; `1` disables batching. Batching is skipped automatically when `--condition_on_previous_text` is set.
+
+When using the default `--vad_method silero`, or when the `--vad_method auto` path falls back to Silero, Silero loads from the local Torch Hub cache first. To force a local Silero checkout, set:
 
 ```bash
 export MLX_WHISPERX_SILERO_VAD_PATH=/path/to/snakers4_silero-vad
@@ -417,21 +422,13 @@ Suppress numerals and currency symbols during decoding:
 mlx-whisperx audio.wav --suppress_numerals --output_format json
 ```
 
-Require pyannote VAD instead of the default auto fallback behavior:
+Require pyannote VAD instead of the default Silero behavior:
 
 ```bash
 mlx-whisperx audio.wav \
   --vad_method pyannote \
   --vad_model pyannote/segmentation-3.0 \
   --hf_token YOUR_HF_TOKEN \
-  --output_format json
-```
-
-Keep non-speech audio while still cutting at VAD boundaries:
-
-```bash
-mlx-whisperx audio.wav \
-  --vad_cut_only \
   --output_format json
 ```
 
@@ -464,12 +461,12 @@ mlx-whisperx first.wav second.wav third.wav --output_dir transcripts --output_fo
 
 ## Current Behavior and Limitations
 
-- ASR decodes merged VAD chunks serially.
-- There is no `batch_size` CLI or API option.
+- ASR decodes merged VAD chunks in batches of `--batch_size` (default 8); set `--batch_size 1` to decode serially.
+- Batching is disabled automatically when `--condition_on_previous_text` is set, because chunks then depend on each other.
 - `translate` skips forced alignment because alignment models are transcription-language specific.
 - Missing `torch`, `torchaudio`, or `transformers` still fail alignment by default; pass `--allow_missing_alignment_deps` to continue with ASR-only output instead.
 - `clip_timestamps` is only supported with `--no_vad` because VAD chunking changes the timing base before ASR runs.
-- Pyannote VAD and diarization depend on a compatible PyTorch, torchaudio, pyannote installation, and Hugging Face model access when the selected model is gated. Without that stack, the default `--vad_method auto` path falls back to Silero VAD.
+- Pyannote VAD and diarization depend on a compatible PyTorch, torchaudio, pyannote installation, and Hugging Face model access when the selected model is gated. Without that stack, use the default `--vad_method silero` path or let `--vad_method auto` fall back to Silero VAD.
 - The vendored ASR backend lives under `mlx_whisperx.backend.mlx_whisper` so decoder behavior can be changed without modifying external reference repositories.
 
 ## Development Checks

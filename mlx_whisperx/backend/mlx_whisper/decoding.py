@@ -851,12 +851,16 @@ class DecodingTask:
         # repeat tokens by the group size, for beam search or best-of-n sampling
         if self.n_group > 1:
             # Beam search and best-of sampling duplicate each audio item into a group of
-            # candidate sequences that share the same encoded audio features.
+            # candidate sequences. The audio features must be repeated to match so each
+            # candidate has its own cross-attention keys/values; relying on broadcasting
+            # only works when n_audio == 1. Repeat interleaves each item n_group times,
+            # matching the (n_audio, n_group) -> (n_audio * n_group) token layout below.
             tokens = tokens[:, None, :]
             tokens = mx.broadcast_to(
                 tokens, [n_audio, self.n_group, len(self.initial_tokens)]
             )
             tokens = tokens.reshape((n_audio * self.n_group, len(self.initial_tokens)))
+            audio_features = mx.repeat(audio_features, self.n_group, axis=0)
 
         # call the main sampling loop
         tokens, sum_logprobs, no_speech_probs = self._main_loop(audio_features, tokens)

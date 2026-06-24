@@ -84,7 +84,7 @@ class PipelineTests(unittest.TestCase):
             ),
         ):
             vad_dump_path = str(Path(tmpdir) / "vad.json")
-            pipeline = MLXWhisperXPipeline(PipelineOptions(vad_dump_path=vad_dump_path))
+            pipeline = MLXWhisperXPipeline(PipelineOptions(vad_method="auto", vad_dump_path=vad_dump_path))
             with self.assertLogs("mlx_whisperx.pipeline", level="WARNING") as logs:
                 chunks = pipeline._vad_chunks(np.zeros(16000, dtype=np.float32))
             payload = json.loads(Path(vad_dump_path).read_text(encoding="utf-8"))
@@ -164,60 +164,6 @@ class PipelineTests(unittest.TestCase):
         self.assertFalse(fake_backend.transcribe.call_args.kwargs["verbose"])
         self.assertFalse(fake_backend.transcribe.call_args.kwargs["without_timestamps"])
 
-    def test_vad_cut_only_uses_backend_transcribe_with_timestamps(self):
-        fake_backend = mock.Mock()
-        fake_backend.transcribe.return_value = {
-            "segments": [{"start": 0.0, "end": 1.0, "text": "hello"}],
-            "language": "en",
-            "text": "hello",
-        }
-        fake_backend.transcribe_chunk.return_value = {"start": 0.0, "end": 1.0, "text": "ignored"}
-        options = PipelineOptions(vad_cut_only=True, language="en")
-        with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
-            pipeline = MLXWhisperXPipeline(options)
-
-        result = pipeline._asr(
-            np.zeros(16000, dtype=np.float32),
-            [{"start": 0.0, "end": 1.0, "segments": []}],
-        )
-
-        self.assertEqual(result["segments"][0]["text"], "hello")
-        self.assertFalse(fake_backend.transcribe.call_args.kwargs["without_timestamps"])
-        fake_backend.transcribe.assert_called_once()
-        fake_backend.transcribe_chunk.assert_not_called()
-
-    def test_vad_cut_only_chunks_preserve_full_timeline(self):
-        fake_backend = mock.Mock()
-        with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
-            pipeline = MLXWhisperXPipeline(PipelineOptions(vad_cut_only=True, chunk_size=5))
-
-        chunks = pipeline._vad_cut_only_chunks(
-            [
-                {"start": 7.106, "end": 9.694, "segments": [(7.106, 8.062), (9.122, 9.694)]},
-            ],
-            13.0,
-        )
-
-        self.assertEqual(
-            chunks,
-            [
-                {"start": 0.0, "end": 5.0, "segments": []},
-                {"start": 5.0, "end": 7.106, "segments": []},
-                {"start": 7.106, "end": 9.694, "segments": [(7.106, 8.062), (9.122, 9.694)]},
-                {"start": 9.694, "end": 13.0, "segments": []},
-            ],
-        )
-
-    def test_vad_cut_only_without_speech_returns_full_file_chunk(self):
-        fake_backend = mock.Mock()
-        with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
-            pipeline = MLXWhisperXPipeline(PipelineOptions(vad_cut_only=True))
-
-        self.assertEqual(
-            pipeline._vad_cut_only_chunks([], 12.5),
-            [{"start": 0.0, "end": 12.5, "segments": []}],
-        )
-
     def test_asr_without_vad_handles_shadowed_backend_transcribe_module(self):
         transcribe_func = mock.Mock(
             return_value={
@@ -248,7 +194,7 @@ class PipelineTests(unittest.TestCase):
             {"start": 0.0, "end": 1.5, "text": "world", "avg_logprob": -0.2},
         ]
         with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
-            pipeline = MLXWhisperXPipeline(PipelineOptions())
+            pipeline = MLXWhisperXPipeline(PipelineOptions(batch_size=1))
 
         result = pipeline._asr(
             np.zeros(16000 * 5, dtype=np.float32),
@@ -280,7 +226,7 @@ class PipelineTests(unittest.TestCase):
             "avg_logprob": -0.1,
         }
         with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
-            pipeline = MLXWhisperXPipeline(PipelineOptions())
+            pipeline = MLXWhisperXPipeline(PipelineOptions(batch_size=1))
 
         audio = np.arange(16000 * 6, dtype=np.float32)
         pipeline._asr(
@@ -308,7 +254,7 @@ class PipelineTests(unittest.TestCase):
             "avg_logprob": -0.1,
         }
         with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
-            pipeline = MLXWhisperXPipeline(PipelineOptions())
+            pipeline = MLXWhisperXPipeline(PipelineOptions(batch_size=1))
 
         result = pipeline._asr(
             np.zeros(16000 * 15, dtype=np.float32),
@@ -324,6 +270,92 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(
             result["segments"],
             [{"start": 10.8, "end": 12.2, "text": "hello", "avg_logprob": -0.1}],
+        )
+
+    def test_asr_with_vad_batches_chunks_into_single_backend_call(self):
+        fake_backend = mock.Mock()
+        fake_backend.detect_language.return_value = "en"
+        fake_backend.transcribe_chunks_batched.return_value = [
+            {"start": 0.0, "end": 1.0, "text": "hello", "avg_logprob": -0.1},
+            {"start": 0.0, "end": 1.5, "text": "world", "avg_logprob": -0.2},
+        ]
+        with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
+            pipeline = MLXWhisperXPipeline(PipelineOptions(batch_size=8))
+
+        result = pipeline._asr(
+            np.zeros(16000 * 5, dtype=np.float32),
+            [
+                {"start": 1.0, "end": 2.0, "segments": [(1.0, 2.0)]},
+                {"start": 3.0, "end": 4.5, "segments": [(3.0, 4.5)]},
+            ],
+        )
+
+        self.assertEqual(
+            result["segments"],
+            [
+                {"start": 1.0, "end": 2.0, "text": "hello", "avg_logprob": -0.1},
+                {"start": 3.0, "end": 4.5, "text": "world", "avg_logprob": -0.2},
+            ],
+        )
+        fake_backend.transcribe_chunks_batched.assert_called_once()
+        kwargs = fake_backend.transcribe_chunks_batched.call_args.kwargs
+        self.assertEqual(kwargs["batch_size"], 8)
+        self.assertNotIn("verbose", kwargs)
+        fake_backend.transcribe_chunk.assert_not_called()
+
+    def test_condition_on_previous_text_disables_vad_batching(self):
+        fake_backend = mock.Mock()
+        fake_backend.detect_language.return_value = "en"
+        fake_backend.transcribe_chunk.return_value = {
+            "start": 0.0,
+            "end": 1.0,
+            "text": "hello",
+            "avg_logprob": -0.1,
+        }
+        with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
+            pipeline = MLXWhisperXPipeline(
+                PipelineOptions(batch_size=8, condition_on_previous_text=True)
+            )
+
+        pipeline._asr(
+            np.zeros(16000 * 3, dtype=np.float32),
+            [{"start": 1.0, "end": 2.0, "segments": [(1.0, 2.0)]}],
+        )
+
+        fake_backend.transcribe_chunk.assert_called_once()
+        fake_backend.transcribe_chunks_batched.assert_not_called()
+
+    def test_vad_batching_compacts_chunks_without_internal_silence(self):
+        fake_backend = mock.Mock()
+        fake_backend.transcribe_chunks_batched.return_value = [
+            {"start": 0.0, "end": 2.0, "text": "hello", "avg_logprob": -0.1, "language": "en"},
+            {"start": 0.0, "end": 2.0, "text": "world", "avg_logprob": -0.2, "language": "en"},
+        ]
+        with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
+            pipeline = MLXWhisperXPipeline(PipelineOptions(batch_size=8, language="en"))
+
+        audio = np.arange(16000 * 5, dtype=np.float32)
+        result = pipeline._asr(
+            audio,
+            [
+                {"start": 1.0, "end": 3.0, "segments": [(1.2, 1.8)]},
+                {"start": 3.0, "end": 5.0, "segments": [(3.4, 4.2)]},
+            ],
+        )
+
+        first_chunk = fake_backend.transcribe_chunks_batched.call_args.args[0][0]
+        second_chunk = fake_backend.transcribe_chunks_batched.call_args.args[0][1]
+        np.testing.assert_array_equal(first_chunk, audio[19200:28800])
+        np.testing.assert_array_equal(second_chunk, audio[54400:67200])
+        kwargs = fake_backend.transcribe_chunks_batched.call_args.kwargs
+        self.assertEqual(kwargs["batch_size"], 8)
+        self.assertTrue(kwargs["without_timestamps"])
+        self.assertEqual(
+            result["segments"],
+            [
+                {"start": 1.2, "end": 1.8, "text": "hello", "avg_logprob": -0.1},
+                {"start": 3.4, "end": 4.2, "text": "world", "avg_logprob": -0.2},
+            ],
         )
 
     def test_pipeline_normalizes_language_for_direct_usage(self):

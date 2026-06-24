@@ -6,6 +6,21 @@ import warnings
 from unittest import mock
 
 
+class _FakeMels:
+    """Minimal stand-in for an MLX array of stacked Mel windows."""
+
+    def __init__(self, items):
+        self._items = list(items)
+        self.shape = (len(self._items),)
+
+    def __getitem__(self, index):
+        return self._items[index]
+
+
+def mx_array(items):
+    return _FakeMels(items)
+
+
 class BackendTranscribeTests(unittest.TestCase):
     STUBBED_MODULES = [
         "mlx",
@@ -53,6 +68,8 @@ class BackendTranscribeTests(unittest.TestCase):
             mx_core.float16 = "float16"
         if not hasattr(mx_core, "float32"):
             mx_core.float32 = "float32"
+        if not hasattr(mx_core, "stack"):
+            mx_core.stack = lambda items: list(items)
         mx_module.core = mx_core
         sys.modules.setdefault("tqdm", types.ModuleType("tqdm"))
 
@@ -79,9 +96,10 @@ class BackendTranscribeTests(unittest.TestCase):
                 self.__dict__.update(kwargs)
 
         class FakeDecodingResult:
-            def __init__(self, compression_ratio=0.0, avg_logprob=0.0):
+            def __init__(self, compression_ratio=0.0, avg_logprob=0.0, no_speech_prob=0.0):
                 self.compression_ratio = compression_ratio
                 self.avg_logprob = avg_logprob
+                self.no_speech_prob = no_speech_prob
 
         decoding.DecodingOptions = FakeDecodingOptions
         decoding.DecodingResult = FakeDecodingResult
@@ -143,6 +161,43 @@ class BackendTranscribeTests(unittest.TestCase):
         self.assertFalse(hasattr(second_options, "beam_size"))
         self.assertEqual(len(caught), 1)
         self.assertIn("retrying with greedy decoding", str(caught[0].message))
+
+    def test_batch_fallback_only_rebatches_failing_windows(self):
+        transcribe = self._import_transcribe()
+
+        good = transcribe.DecodingResult(compression_ratio=0.0, avg_logprob=0.0)
+        # First item fails logprob threshold at T=0, then passes at the next temperature.
+        bad_then_good = [
+            transcribe.DecodingResult(compression_ratio=0.0, avg_logprob=-5.0),
+            transcribe.DecodingResult(compression_ratio=0.0, avg_logprob=0.0),
+        ]
+        calls = []
+
+        def fake_decode(mels, options):
+            calls.append((list(mels), options.temperature))
+            if options.temperature == 0.0:
+                return [bad_then_good[0], good]
+            # Only the failing window is re-decoded.
+            return [bad_then_good[1]]
+
+        model = types.SimpleNamespace(decode=mock.Mock(side_effect=fake_decode))
+
+        results = transcribe._decode_batch_with_fallback(
+            model,
+            mx_array([10, 20]),
+            temperature=(0.0, 0.2),
+            compression_ratio_threshold=2.4,
+            logprob_threshold=-1.0,
+            no_speech_threshold=0.6,
+            decode_options={"beam_size": 5, "patience": 1.0, "language": "en"},
+        )
+
+        self.assertEqual(results, [bad_then_good[1], good])
+        # Second decode call re-batches only the single failing window.
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][1], 0.0)
+        self.assertEqual(calls[1][1], 0.2)
+        self.assertEqual(len(calls[1][0]), 1)
 
     def test_decode_with_fallback_reraises_other_runtime_errors(self):
         transcribe = self._import_transcribe()
