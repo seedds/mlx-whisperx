@@ -23,10 +23,10 @@ audio -> VAD -> mlx-whisper ASR -> forced alignment -> optional diarization -> w
 
 Default behavior:
 
-- ASR model: `mlx-community/whisper-large-v3-mlx`
-- VAD backend: pyannote when available, otherwise Silero
+- ASR model: `mlx-community/whisper-turbo`
+- VAD backend: Silero (`--vad_method silero`)
 - Chunking: VAD chunks decoded in batches of 8 (`--batch_size 8`)
-- Decoding: beam search with `beam_size=5` and `temperature=0`
+- Decoding: greedy decoding with `beam_size=1` and `temperature=0`
 - Alignment: enabled for transcription
 - Diarization: disabled unless `--diarize` is passed
 
@@ -48,7 +48,7 @@ The published package constrains the alignment stack to a tested range:
 
 `torchvision` is not required for alignment.
 
-Install diarization support when you want pyannote VAD and diarization instead of the automatic Silero fallback:
+Install diarization support when you want pyannote VAD and diarization in addition to the default Silero path:
 
 ```bash
 python -m pip install -e ".[diarize]"
@@ -78,7 +78,7 @@ mlx-whisperx AUDIO [AUDIO ...] [OPTIONS]
 
 By default, `mlx-whisperx`:
 
-- uses `mlx-community/whisper-large-v3-mlx`
+- uses `mlx-community/whisper-turbo`
 - runs Silero VAD by default
 - performs forced alignment for word timestamps
 - writes outputs to the current directory
@@ -164,7 +164,7 @@ Complete example with optional parameters:
 
 ```bash
 mlx-whisperx audio.wav \
-  --model mlx-community/whisper-large-v3-mlx \
+  --model mlx-community/whisper-turbo \
   --model_dir ./models \
   --model_cache_only False \
   --device cpu \
@@ -194,7 +194,7 @@ mlx-whisperx audio.wav \
   --temperature 0.0 \
   --temperature_increment_on_fallback 0.2 \
   --best_of 5 \
-  --beam_size 5 \
+  --beam_size 1 \
   --patience 1.0 \
   --length_penalty 1.0 \
   --suppress_tokens -1 \
@@ -226,7 +226,7 @@ from mlx_whisperx import transcribe
 
 result = transcribe(
     "audio.wav",
-    model="mlx-community/whisper-large-v3-mlx",
+    model="mlx-community/whisper-turbo",
     language="en",
 )
 ```
@@ -257,9 +257,9 @@ Common API options match the CLI names:
 ```python
 result = transcribe(
     "audio.wav",
-    model="mlx-community/whisper-large-v3-mlx",
+    model="mlx-community/whisper-turbo",
     language="en",
-    beam_size=5,
+    beam_size=1,
     temperature=0.0,
     no_align=False,
     diarize=False,
@@ -314,7 +314,7 @@ English-only Whisper models such as `.en` checkpoints force `language=en` and do
 Decoding options:
 
 - `--temperature`: sampling temperature. Default is `0.0`.
-- `--beam_size`: beam size when `temperature=0`. Default is `5`.
+- `--beam_size`: beam size when `temperature=0`. Default is `1`.
 - `--best_of`: number of candidates when sampling with `temperature > 0`.
 - `--patience`: beam-search patience.
 - `--length_penalty`: beam-search length penalty.
