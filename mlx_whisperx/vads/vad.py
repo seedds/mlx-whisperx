@@ -26,6 +26,26 @@ class Vad:
         return audio
 
     @staticmethod
+    def split_long_segments(segments, chunk_size: int) -> list["Segment"]:
+        """Split speech turns longer than `chunk_size` into decoder-sized pieces.
+
+        A single VAD turn can exceed the ASR window when a backend returns its own
+        speech timeline instead of raw scores. Merging alone never splits one turn, so
+        the oversized turn would be trimmed to the decoder window and lose its tail.
+        """
+        if chunk_size <= 0:
+            return list(segments)
+
+        split: list[Segment] = []
+        for segment in segments:
+            start = segment.start
+            while segment.end - start > chunk_size:
+                split.append(Segment(start, start + chunk_size, segment.speaker))
+                start += chunk_size
+            split.append(Segment(start, segment.end, segment.speaker))
+        return split
+
+    @staticmethod
     def merge_chunks(segments, chunk_size: int, onset: float, offset: Optional[float]):
         """Merge adjacent speech segments into ASR chunks capped by `chunk_size`.
 
@@ -36,6 +56,7 @@ class Vad:
         if len(segments) == 0:
             return []
 
+        segments = Vad.split_long_segments(segments, chunk_size)
         curr_end = 0.0
         curr_start = segments[0].start
         seg_idxs: list[tuple[float, float]] = []

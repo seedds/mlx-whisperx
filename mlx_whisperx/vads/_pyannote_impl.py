@@ -1,6 +1,6 @@
 """Pyannote voice activity detection backend implementation."""
 
-from .._compat import prepare_pyannote_audio_compat
+from .._compat import hf_offline, prepare_pyannote_audio_compat
 from .vad import Segment, Vad
 
 
@@ -25,7 +25,15 @@ def _voice_activity_hyperparameters(pipeline, vad_onset: float, vad_offset: floa
 class Pyannote(Vad):
     """Pyannote segmentation pipeline adapted to the shared VAD interface."""
 
-    def __init__(self, device, token=None, model_name=None, cache_dir=None, **kwargs):
+    def __init__(
+        self,
+        device,
+        token=None,
+        model_name=None,
+        cache_dir=None,
+        model_cache_only: bool = False,
+        **kwargs,
+    ):
         """Load and configure pyannote voice activity detection."""
         super().__init__(kwargs["vad_onset"])
         try:
@@ -50,7 +58,8 @@ class Pyannote(Vad):
 
         model_name = model_name or DEFAULT_PYANNOTE_VAD_MODEL
         try:
-            model = Model.from_pretrained(model_name, token=token, cache_dir=cache_dir)
+            with hf_offline(model_cache_only):
+                model = Model.from_pretrained(model_name, token=token, cache_dir=cache_dir)
             if model is None:
                 raise RuntimeError("model loader returned None")
         except Exception as exc:
