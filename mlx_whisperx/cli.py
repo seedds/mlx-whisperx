@@ -149,12 +149,20 @@ def main() -> None:
         args["fp16"] = False
 
     increment = args.pop("temperature_increment_on_fallback")
+    if increment is not None and increment <= 0:
+        # A zero increment divides by zero inside arange; a negative one yields an
+        # empty temperature ladder and no decode attempts at all.
+        parser.error("--temperature_increment_on_fallback must be greater than 0")
     if increment is not None:
         # Match Whisper's fallback behavior by trying a temperature ladder when the
         # backend reports repetition or low-confidence failures.
         args["temperature"] = tuple(np.arange(args["temperature"], 1.0 + 1e-6, increment))
 
     audio_files = args.pop("audio")
+    if output_name and len(audio_files) > 1:
+        parser.error("--output_name cannot be used with multiple input files")
+
+    failures = 0
     for audio_path in audio_files:
         # Continue processing later files after a per-file failure; batch CLI usage is
         # more useful when one bad file does not abort the entire run.
@@ -163,8 +171,13 @@ def main() -> None:
             result = transcribe(audio_path, **args)
             writer(result, name, writer_args)
         except Exception as exc:
+            failures += 1
             traceback.print_exc()
             print(f"Skipping {audio_path} due to {type(exc).__name__}: {exc}")
+
+    if failures:
+        # Scripts and CI need a nonzero status when outputs are missing.
+        raise SystemExit(f"{failures} of {len(audio_files)} input(s) failed")
 
 
 if __name__ == "__main__":

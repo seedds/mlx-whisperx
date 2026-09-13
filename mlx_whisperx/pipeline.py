@@ -21,7 +21,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-from ._language import normalize_language_settings
+from ._language import is_english_only_model, normalize_language_settings
 from ._compat import import_mlx_whisper
 from .alignment import AlignmentDependencyError, align, load_align_model
 from .audio import SAMPLE_RATE, audio_to_numpy, slice_audio
@@ -32,17 +32,30 @@ from .vads import AUTO_VAD_METHOD, get_vad_class
 
 logger = get_logger(__name__)
 NUMERAL_SYMBOLS = "0123456789%$£"
+# One Whisper encoder window; VAD chunks are decoded whole, so they cannot exceed it.
+MAX_CHUNK_SIZE = 30
 
 
 @lru_cache(maxsize=32)
-def _find_numeral_symbol_tokens(language: Optional[str], task: str) -> tuple[int, ...]:
+def _find_numeral_symbol_tokens(
+    language: Optional[str],
+    task: str,
+    multilingual: bool = True,
+) -> tuple[int, ...]:
     """Return tokenizer IDs whose decoded text contains numeric/currency symbols.
 
     This supports the `suppress_numerals` option without hard-coding vocabulary IDs,
-    which differ between tokenizer variants and language/task settings.
+    which differ between tokenizer variants and language/task settings. English-only
+    checkpoints use a different vocabulary, so suppression must be computed against the
+    same tokenizer the model will decode with.
     """
     tokenizer_module = importlib.import_module("mlx_whisperx.backend.mlx_whisper.tokenizer")
-    tokenizer = tokenizer_module.get_tokenizer(True, language=language or "en", task=task)
+    # `get_tokenizer` drops language/task itself for English-only vocabularies.
+    tokenizer = tokenizer_module.get_tokenizer(
+        multilingual,
+        language=language or "en",
+        task=task,
+    )
     numeral_symbol_tokens: list[int] = []
     for token_id in range(tokenizer.eot):
         token = tokenizer.decode([token_id]).removeprefix(" ")
@@ -133,6 +146,12 @@ class MLXWhisperXPipeline:
         """Execute the full configured pipeline for a path or waveform."""
         if self.options.clip_timestamps is not None and not self.options.no_vad:
             raise ValueError("clip_timestamps requires no_vad=True")
+        if not self.options.no_vad and self.options.chunk_size > MAX_CHUNK_SIZE:
+            # Chunks are decoded as one encoder window, so a larger chunk would lose
+            # everything past the window instead of being transcribed.
+            raise ValueError(
+                f"chunk_size must be at most {MAX_CHUNK_SIZE} seconds, got {self.options.chunk_size}"
+            )
 
         audio_np = audio_to_numpy(audio)
         audio_path = audio if isinstance(audio, str) else None
@@ -269,6 +288,7 @@ class MLXWhisperXPipeline:
                 token=self.options.hf_token,
                 model_name=self.options.vad_model,
                 cache_dir=self.options.model_dir,
+                model_cache_only=self.options.model_cache_only,
                 vad_onset=self.options.vad_onset,
                 vad_offset=self.options.vad_offset,
                 chunk_size=self.options.chunk_size,
@@ -326,7 +346,11 @@ class MLXWhisperXPipeline:
             logger.info("Suppressing numeral and symbol tokens")
             suppress_tokens = _merge_suppress_tokens(
                 self.options.suppress_tokens,
-                _find_numeral_symbol_tokens(self.options.language, self.options.task),
+                _find_numeral_symbol_tokens(
+                    self.options.language,
+                    self.options.task,
+                    not is_english_only_model(self.options.model),
+                ),
             )
 
         prompt = self.options.initial_prompt
@@ -362,6 +386,9 @@ class MLXWhisperXPipeline:
             "temperature": self.options.temperature,
             "compression_ratio_threshold": self.options.compression_ratio_threshold,
             "logprob_threshold": self.options.logprob_threshold,
+            # Forward explicitly so serial and batched chunk decoding apply the same
+            # silence rule instead of each falling back to a different default.
+            "no_speech_threshold": self.options.no_speech_threshold,
             "initial_prompt": prompt,
             **decode_kwargs,
         }
@@ -398,7 +425,6 @@ class MLXWhisperXPipeline:
                 continue
 
             backend_kwargs = {
-                "no_speech_threshold": self.options.no_speech_threshold,
                 "condition_on_previous_text": self.options.condition_on_previous_text,
                 "word_timestamps": False,
                 **asr_kwargs,
@@ -685,6 +711,7 @@ class MLXWhisperXPipeline:
             token=self.options.hf_token,
             device=self.options.device,
             cache_dir=self.options.model_dir,
+            model_cache_only=self.options.model_cache_only,
         )
         diarize_result = diarize_model(
             audio,

@@ -472,3 +472,45 @@ class PipelineTests(unittest.TestCase):
 
         self.assertIsNot(first, second)
         self.assertEqual(load_model.call_count, 2)
+
+
+class PipelineOptionForwardingTests(unittest.TestCase):
+    def _asr_kwargs(self, **overrides):
+        with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=mock.Mock()):
+            pipeline = MLXWhisperXPipeline(PipelineOptions(**overrides))
+            return pipeline._build_asr_kwargs(without_timestamps=True)
+
+    def test_no_speech_threshold_is_forwarded_to_the_backend(self):
+        kwargs = self._asr_kwargs(no_speech_threshold=0.25)
+
+        self.assertEqual(kwargs["no_speech_threshold"], 0.25)
+
+    def test_no_speech_threshold_none_is_preserved(self):
+        kwargs = self._asr_kwargs(no_speech_threshold=None)
+
+        self.assertIsNone(kwargs["no_speech_threshold"])
+
+    def test_suppress_numerals_uses_the_english_only_vocabulary(self):
+        captured = []
+
+        def fake_tokens(language, task, multilingual=True):
+            captured.append(multilingual)
+            return (1, 2)
+
+        with mock.patch("mlx_whisperx.pipeline._find_numeral_symbol_tokens", side_effect=fake_tokens):
+            self._asr_kwargs(model="tiny.en", suppress_numerals=True)
+            self._asr_kwargs(model="mlx-community/whisper-turbo", suppress_numerals=True)
+
+        self.assertEqual(captured, [False, True])
+
+    def test_chunk_size_larger_than_the_decoder_window_is_rejected(self):
+        with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=mock.Mock()):
+            pipeline = MLXWhisperXPipeline(PipelineOptions(chunk_size=60))
+            with self.assertRaisesRegex(ValueError, "chunk_size must be at most 30"):
+                pipeline.transcribe(np.zeros(16000, dtype=np.float32))
+
+    def test_no_vad_allows_a_larger_chunk_size(self):
+        with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=mock.Mock()):
+            pipeline = MLXWhisperXPipeline(PipelineOptions(chunk_size=60, no_vad=True))
+            with mock.patch.object(pipeline, "_asr", return_value={"segments": [], "language": "en"}):
+                pipeline.transcribe(np.zeros(16000, dtype=np.float32))

@@ -215,6 +215,8 @@ mlx-whisperx audio.wav \
 Notes:
 
 - `--output_format all` writes `.txt`, `.vtt`, `.srt`, `.tsv`, `.json`, and `.aud`.
+- `--output_name` accepts a single input file, so batch runs cannot overwrite one output.
+- `.aud` is an Audacity label track: tab-separated start/end seconds and label text.
 - `--max_line_count` only has an effect when `--max_line_width` is also set.
 - `--highlight_words` applies to `srt` and `vtt`.
 - `--hf_token` is only needed for gated pyannote models.
@@ -466,6 +468,8 @@ mlx-whisperx first.wav second.wav third.wav --output_dir transcripts --output_fo
 - `translate` skips forced alignment because alignment models are transcription-language specific.
 - Missing `torch`, `torchaudio`, or `transformers` still fail alignment by default; pass `--allow_missing_alignment_deps` to continue with ASR-only output instead.
 - `clip_timestamps` is only supported with `--no_vad` because VAD chunking changes the timing base before ASR runs.
+- VAD chunks are capped at `--chunk_size` seconds, which must not exceed the 30-second decoder window; longer chunks are rejected rather than silently truncated.
+- The CLI exits nonzero when any input file fails, while still processing the remaining files.
 - Pyannote VAD and diarization depend on a compatible PyTorch, torchaudio, pyannote installation, and Hugging Face model access when the selected model is gated. Without that stack, use the default `--vad_method silero` path or let `--vad_method auto` fall back to Silero VAD.
 - The vendored ASR backend lives under `mlx_whisperx.backend.mlx_whisper` so decoder behavior can be changed without modifying external reference repositories.
 

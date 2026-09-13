@@ -156,3 +156,32 @@ class CLITests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertTrue(calls[0]["allow_missing_alignment_deps"])
         writer.assert_called_once()
+
+    def test_main_exits_nonzero_when_every_file_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            argv = ["mlx-whisperx", "a.wav", "b.wav", "--output_dir", tmpdir, "--output_format", "json"]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch("mlx_whisperx.cli.transcribe", side_effect=RuntimeError("boom")),
+                mock.patch("mlx_whisperx.cli.get_writer", return_value=mock.Mock()),
+            ):
+                with self.assertRaises(SystemExit) as exc:
+                    cli.main()
+
+        self.assertNotEqual(exc.exception.code, 0)
+
+    def test_zero_temperature_increment_is_rejected(self):
+        argv = ["mlx-whisperx", "audio.wav", "--temperature_increment_on_fallback", "0"]
+        with mock.patch.object(sys, "argv", argv):
+            with self.assertRaises(SystemExit) as exc:
+                cli.main()
+
+        self.assertEqual(exc.exception.code, 2)
+
+    def test_output_name_is_rejected_for_multiple_inputs(self):
+        argv = ["mlx-whisperx", "a.wav", "b.wav", "--output_name", "combined"]
+        with mock.patch.object(sys, "argv", argv):
+            with self.assertRaises(SystemExit) as exc:
+                cli.main()
+
+        self.assertEqual(exc.exception.code, 2)
