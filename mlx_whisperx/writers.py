@@ -33,7 +33,10 @@ class ResultWriter:
 
     def __call__(self, result: dict, output_name: str, options: Optional[dict] = None):
         """Open the target output path and delegate serialization."""
-        output_path = (pathlib.Path(self.output_dir) / output_name).with_suffix(f".{self.extension}")
+        # Append rather than replace the suffix: the caller already stripped the audio
+        # extension, and `with_suffix` would collapse dotted basenames such as
+        # "meeting.part1" and "meeting.part2" onto the same output file.
+        output_path = pathlib.Path(self.output_dir) / f"{output_name}.{self.extension}"
         with output_path.open("w", encoding="utf-8") as file:
             self.write_result(result, file=file, options=options or {})
 
@@ -64,10 +67,25 @@ class WriteJSON(ResultWriter):
         json.dump(result, file, ensure_ascii=False)
 
 
-class WriteAUD(WriteJSON):
-    """Audacity-style JSON alias used by this package's output format list."""
+class WriteAUD(ResultWriter):
+    """Audacity label track: tab-separated seconds and label text, no header."""
 
     extension = "aud"
+
+    def write_result(self, result: dict, file: TextIO, options: dict):
+        for segment in result.get("segments", []):
+            text = segment.get("text", "").strip().replace("\t", " ")
+            speaker = segment.get("speaker")
+            if speaker:
+                text = f"[[{speaker}]]{text}"
+            print(
+                segment.get("start", 0.0),
+                segment.get("end", 0.0),
+                text,
+                sep="\t",
+                file=file,
+                flush=True,
+            )
 
 
 class WriteTSV(ResultWriter):
@@ -106,6 +124,55 @@ class SubtitlesWriter(ResultWriter):
         if language in LANGUAGES_WITHOUT_SPACES:
             return "".join(words)
         return " ".join(words).replace(" \n", "\n").replace("\n ", "\n")
+
+    @staticmethod
+    def _apply_line_limits(
+        text: str,
+        max_line_width: Optional[int],
+        max_line_count: Optional[int],
+        max_words_per_line: Optional[int],
+        language: Optional[str],
+    ) -> list[str]:
+        """Break unaligned text into cues honoring the configured subtitle limits.
+
+        The aligned path enforces these limits per word. Without word timings the text
+        is still split here, so the same options do not silently stop applying.
+        """
+        if max_line_width is None and max_words_per_line is None:
+            return [text]
+        if language in LANGUAGES_WITHOUT_SPACES:
+            # Without word boundaries there is nothing safe to break on.
+            return [text]
+
+        words = text.split()
+        if not words:
+            return [text]
+
+        lines: list[str] = []
+        current: list[str] = []
+        for word in words:
+            candidate = current + [word]
+            too_wide = (
+                max_line_width is not None
+                and len(" ".join(candidate)) > max_line_width
+                and current
+            )
+            too_many = max_words_per_line is not None and len(candidate) > max_words_per_line
+            if too_wide or too_many:
+                lines.append(" ".join(current))
+                current = [word]
+            else:
+                current = candidate
+        if current:
+            lines.append(" ".join(current))
+
+        if max_line_width is None or max_line_count is None:
+            return lines
+        # Group the wrapped lines into cues of at most `max_line_count` lines each.
+        return [
+            "\n".join(lines[idx : idx + max_line_count])
+            for idx in range(0, len(lines), max_line_count)
+        ]
 
     @staticmethod
     def _split_unaligned_segment_text(text: str) -> list[str]:
@@ -167,15 +234,29 @@ class SubtitlesWriter(ResultWriter):
                     else:
                         long_pause = False
 
-                    has_room = line_len + len(word_text) <= max_line_width
+                    speaker = timing.get("speaker") or segment.get("speaker")
+                    # `_join_words` inserts a separator, so it has to be counted too or
+                    # cues overrun the requested width by one character per word.
+                    separator_len = 0 if language in LANGUAGES_WITHOUT_SPACES else 1
+                    has_room = line_len + separator_len + len(word_text) <= max_line_width
                     seg_break = idx == 0 and len(subtitle) > 0 and preserve_segments
                     word_break = max_words_per_line is not None and word_count >= max_words_per_line
-                    if line_len > 0 and has_room and not long_pause and not seg_break and not word_break:
-                        line_len += len(word_text)
+                    # A cue renders a single speaker prefix, so a speaker change must
+                    # start a new cue or the new speaker's words are misattributed.
+                    speaker_break = len(times) > 0 and speaker != times[-1][2]
+                    if (
+                        line_len > 0
+                        and has_room
+                        and not long_pause
+                        and not seg_break
+                        and not word_break
+                        and not speaker_break
+                    ):
+                        line_len += separator_len + len(word_text)
                     else:
                         timing["word"] = word_text.strip()
                         if (
-                            (len(subtitle) > 0 and word_break)
+                            (len(subtitle) > 0 and (word_break or speaker_break))
                             or (
                                 len(subtitle) > 0
                                 and max_line_count is not None
@@ -200,7 +281,7 @@ class SubtitlesWriter(ResultWriter):
                         (
                             float(segment.get("start", 0.0)),
                             float(segment.get("end", 0.0)),
-                            timing.get("speaker") or segment.get("speaker"),
+                            speaker,
                         )
                     )
                     word_count += 1
@@ -233,20 +314,26 @@ class SubtitlesWriter(ResultWriter):
                 if highlight_words and has_timing:
                     # Emit multiple cues over the same text, underlining one active word
                     # at a time. This is the common karaoke-style SRT/VTT convention.
-                    last = subtitle_start
+                    last = min(word_starts)
                     for word_idx, word in enumerate(subtitle):
                         if "start" not in word or "end" not in word:
                             continue
+                        # Compare numerically: overlapping or rounded word timings would
+                        # otherwise emit a gap cue that runs backwards.
+                        if float(word["start"]) > last:
+                            yield (
+                                self.format_timestamp(last),
+                                self.format_timestamp(float(word["start"])),
+                                prefix + subtitle_text,
+                            )
                         word_start = self.format_timestamp(float(word["start"]))
                         word_end = self.format_timestamp(float(word["end"]))
-                        if last != word_start:
-                            yield last, word_start, prefix + subtitle_text
                         highlighted_words = [
                             re.sub(r"^(\s*)(.*)$", r"\1<u>\2</u>", token) if idx == word_idx else token
                             for idx, token in enumerate(raw_words)
                         ]
                         yield word_start, word_end, prefix + self._join_words(highlighted_words, language)
-                        last = word_end
+                        last = max(last, float(word["end"]))
                 else:
                     yield subtitle_start, subtitle_end, prefix + subtitle_text
             return
@@ -262,6 +349,17 @@ class SubtitlesWriter(ResultWriter):
             start = float(segment.get("start", 0.0))
             end = float(segment.get("end", 0.0))
             chunks = self._split_unaligned_segment_text(text)
+            chunks = [
+                piece
+                for chunk in chunks
+                for piece in self._apply_line_limits(
+                    chunk,
+                    raw_max_line_width,
+                    max_line_count,
+                    max_words_per_line,
+                    language,
+                )
+            ]
             if len(chunks) <= 1 or end <= start:
                 yield (
                     self.format_timestamp(start),
