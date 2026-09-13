@@ -97,37 +97,70 @@ DEFAULT_ALIGN_MODELS_HF = {
 
 def interpolate_nans(values: pd.Series, method: str = "nearest") -> pd.Series:
     """Fill missing timestamp values while preserving known alignment points."""
+    if method == "ignore":
+        # Pandas has no "ignore" interpolation method. Callers guard on NaN before
+        # assigning timestamps, so leaving the gaps unfilled is the intended behavior.
+        return values
     if values.notnull().sum() > 1:
         return values.interpolate(method=method).ffill().bfill()
     return values.ffill().bfill()
 
 
-def _sentence_spans(text: str, language: str) -> list[tuple[int, int]]:
-    """Return character spans for sentence-like chunks inside an ASR segment."""
+def _regex_sentence_spans(text: str) -> list[tuple[int, int]]:
+    """Split on sentence-final punctuation without needing NLTK data."""
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for match in re.finditer(r"[^.!?。！？]+[.!?。！？]?", text):
+        end = match.end()
+        if end > start:
+            spans.append((start, end))
+        start = end
+    return spans
+
+
+def _load_sentence_splitter(language: str):
+    """Load the Punkt sentence splitter for `language`, or None if unavailable.
+
+    Resolved once per `align` call rather than per segment: the language is fixed for
+    the whole call, so a missing-data download would otherwise be retried for every
+    segment and its failure silently swallowed each time.
+    """
+    if language in LANGUAGES_WITHOUT_SPACES:
+        # Punkt has no model for these languages and the English one returns the whole
+        # segment as a single span, collapsing every sentence onto one timestamp.
+        return None
     try:
         from nltk.data import load as nltk_load
 
         punkt_lang = PUNKT_LANGUAGES.get(language, "english")
         try:
-            splitter = nltk_load(f"tokenizers/punkt_tab/{punkt_lang}.pickle")
+            return nltk_load(f"tokenizers/punkt_tab/{punkt_lang}.pickle")
         except LookupError:
             import nltk
 
-            nltk.download("punkt_tab", quiet=True)
-            splitter = nltk_load(f"tokenizers/punkt_tab/{punkt_lang}.pickle")
-        spans = list(splitter.span_tokenize(text))
-        return spans or [(0, len(text))]
-    except Exception:
-        # Fall back to a punctuation regex if NLTK data is unavailable or unsupported
-        # for the requested language.
-        spans: list[tuple[int, int]] = []
-        start = 0
-        for match in re.finditer(r"[^.!?。！？]+[.!?。！？]?", text):
-            end = match.end()
-            if end > start:
-                spans.append((start, end))
-            start = end
-        return spans or [(0, len(text))]
+            logger.info("Downloading NLTK punkt_tab data for sentence splitting...")
+            if not nltk.download("punkt_tab", quiet=True):
+                raise RuntimeError("nltk.download('punkt_tab') failed")
+            return nltk_load(f"tokenizers/punkt_tab/{punkt_lang}.pickle")
+    except Exception as exc:
+        logger.warning(
+            "Punkt sentence splitting unavailable (%s); falling back to punctuation splitting.",
+            exc,
+        )
+        return None
+
+
+def _sentence_spans(text: str, splitter) -> list[tuple[int, int]]:
+    """Return character spans for sentence-like chunks inside an ASR segment."""
+    spans: list[tuple[int, int]] = []
+    if splitter is not None:
+        try:
+            spans = list(splitter.span_tokenize(text))
+        except Exception:
+            spans = []
+    if not spans:
+        spans = _regex_sentence_spans(text)
+    return spans or [(0, len(text))]
 
 
 def load_align_model(
@@ -239,6 +272,7 @@ def align(
     model_type = align_model_metadata["type"]
     transcript = list(transcript)
     total_segments = len(transcript)
+    sentence_splitter = _load_sentence_splitter(model_lang)
 
     segment_data: dict[int, dict] = {}
     for sdx, segment in enumerate(transcript):
@@ -276,7 +310,7 @@ def align(
             "clean_char": clean_char,
             "clean_cdx": clean_cdx,
             "clean_wdx": list(range(len(per_word))),
-            "sentence_spans": _sentence_spans(text, model_lang),
+            "sentence_spans": _sentence_spans(text, sentence_splitter),
         }
 
     aligned_segments: list[dict] = []
@@ -385,10 +419,13 @@ def align(
         aligned_subsegments: list[dict] = []
         char_segments_df["sentence-idx"] = None
 
-        for sdx2, (sstart, send) in enumerate(segment_data[sdx]["sentence_spans"]):
+        sentence_spans = segment_data[sdx]["sentence_spans"]
+        for sdx2, (sstart, send) in enumerate(sentence_spans):
             # Build smaller subtitle-friendly subsegments while preserving the original
-            # text ordering and word timings.
-            sentence_mask = (char_segments_df.index >= sstart) & (char_segments_df.index <= send)
+            # text ordering and word timings. `span_tokenize` returns an exclusive end,
+            # so an inclusive mask would pull the next sentence's first character - and
+            # its timestamp - into this one.
+            sentence_mask = (char_segments_df.index >= sstart) & (char_segments_df.index < send)
             curr_chars = char_segments_df.loc[sentence_mask]
             char_segments_df.loc[sentence_mask, "sentence-idx"] = sdx2
             sentence_text = text[sstart:send]
@@ -438,7 +475,13 @@ def align(
             if avg_logprob is not None:
                 subsegment["avg_logprob"] = avg_logprob
             if return_char_alignments:
-                chars = curr_chars[["char", "start", "end", "score"]].copy()
+                # Timing uses the exclusive span, but character output must stay gapless,
+                # so it runs up to the start of the next sentence.
+                char_end = sentence_spans[sdx2 + 1][0] if sdx2 + 1 < len(sentence_spans) else len(text)
+                char_mask = (char_segments_df.index >= sstart) & (
+                    char_segments_df.index < max(char_end, send)
+                )
+                chars = char_segments_df.loc[char_mask, ["char", "start", "end", "score"]].copy()
                 chars.fillna(-1, inplace=True)
                 subsegment["chars"] = [
                     {key: value for key, value in char.items() if value != -1}
