@@ -5,14 +5,21 @@ from typing import Optional, Union
 import numpy as np
 import pandas as pd
 
-from ._compat import prepare_pyannote_audio_compat
+from ._compat import hf_offline, prepare_pyannote_audio_compat
 from .audio import SAMPLE_RATE, audio_to_numpy
 
 
 class DiarizationPipeline:
     """Thin wrapper around pyannote's speaker diarization pipeline."""
 
-    def __init__(self, model_name=None, token=None, device="cpu", cache_dir=None):
+    def __init__(
+        self,
+        model_name=None,
+        token=None,
+        device="cpu",
+        cache_dir=None,
+        model_cache_only: bool = False,
+    ):
         """Load the requested pyannote diarization model on the requested device."""
         try:
             prepare_pyannote_audio_compat()
@@ -28,7 +35,14 @@ class DiarizationPipeline:
             device = torch.device(device)
         self._torch = torch
         model_config = model_name or "pyannote/speaker-diarization-community-1"
-        self.model = Pipeline.from_pretrained(model_config, token=token, cache_dir=cache_dir).to(device)
+        with hf_offline(model_cache_only):
+            pipeline = Pipeline.from_pretrained(model_config, token=token, cache_dir=cache_dir)
+        if pipeline is None:
+            raise RuntimeError(
+                f"Could not load pyannote diarization model {model_config!r}. If the model is "
+                "gated, accept its Hugging Face terms and pass --hf_token."
+            )
+        self.model = pipeline.to(device)
 
     def __call__(
         self,
@@ -116,11 +130,18 @@ class IntervalTree:
         return results
 
     def find_nearest(self, time: float) -> Optional[str]:
-        """Return the speaker whose interval midpoint is closest to `time`."""
+        """Return the speaker whose interval is closest to `time`.
+
+        Distance is measured to the interval itself, not its midpoint: a long turn
+        ending just before `time` is nearer than a short turn further away, even when
+        the short turn's midpoint is closer.
+        """
         if len(self.starts) == 0:
             return None
-        mids = (self.starts + self.ends) / 2
-        return self.speakers[int(np.argmin(np.abs(mids - time)))]
+        distances = np.maximum.reduce(
+            [self.starts - time, np.zeros_like(self.starts), time - self.ends]
+        )
+        return self.speakers[int(np.argmin(distances))]
 
 
 def _dominant_speaker(overlaps: list[tuple[str, float]]) -> Optional[str]:

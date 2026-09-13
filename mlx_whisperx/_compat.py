@@ -1,7 +1,30 @@
 """Compatibility helpers that isolate imports of the vendored MLX Whisper backend."""
 
+import contextlib
 import importlib
 import os
+
+
+@contextlib.contextmanager
+def hf_offline(enabled: bool):
+    """Force Hugging Face Hub offline for libraries without a cache-only argument.
+
+    Pyannote loads models through the Hub but exposes no `local_files_only` flag, so
+    the environment variable is the only way to honor `--model_cache_only` there.
+    """
+    if not enabled:
+        yield
+        return
+
+    previous = os.environ.get("HF_HUB_OFFLINE")
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("HF_HUB_OFFLINE", None)
+        else:
+            os.environ["HF_HUB_OFFLINE"] = previous
 
 
 def patch_torchaudio_for_pyannote(torchaudio_module) -> None:
