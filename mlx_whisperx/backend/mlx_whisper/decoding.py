@@ -542,15 +542,17 @@ class ApplyTimestampRules(LogitFilter):
                 else:  # cannot be normal text tokens
                     mask[k, : self.tokenizer.eot] = -np.inf
 
-            timestamps = [
-                i for i, v in enumerate(seq) if v > self.tokenizer.timestamp_begin
-            ]
+            timestamps = [v for v in seq if v >= self.tokenizer.timestamp_begin]
             if len(timestamps) > 0:
-                # timestamps shouldn't decrease; forbid timestamp tokens smaller than the last
-                # also force each segment to have a nonzero length, to prevent infinite looping
-                last_timestamp = timestamps[-1]
-                if not last_timestamp or penultimate_was_timestamp:
-                    last_timestamp += 1
+                # timestamps shouldn't decrease; forbid timestamp tokens smaller than the
+                # last one. These are vocabulary ids, and the mask bound is exclusive.
+                if last_was_timestamp and not penultimate_was_timestamp:
+                    # An open segment may be closed at the same timestamp it started on.
+                    last_timestamp = timestamps[-1]
+                else:
+                    # Otherwise force strictly increasing timestamps so each segment has a
+                    # nonzero length and the seek loop cannot stall.
+                    last_timestamp = timestamps[-1] + 1
                 mask[k, self.tokenizer.timestamp_begin : last_timestamp] = -np.inf
 
         if len(tokens[0]) == self.sample_begin:
@@ -564,19 +566,25 @@ class ApplyTimestampRules(LogitFilter):
                 )
                 mask[:, last_allowed + 1 :] = -np.inf
 
-        # if sum of probability over timestamps is above any other token, sample timestamp
+        # if sum of probability over timestamps is above any other token, sample timestamp.
+        # This is measured on the already-masked logits, so a structurally forbidden
+        # timestamp cannot suppress the text tokens that are still legal.
         mask = mx.array(mask)
-        logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
+        masked_logits = logits + mask
+        logprobs = masked_logits - mx.logsumexp(masked_logits, axis=-1, keepdims=True)
         timestamp_logprob = logprobs[:, self.tokenizer.timestamp_begin :].logsumexp(
             axis=-1, keepdims=True
         )
         max_text_token_logprob = logprobs[:, : self.tokenizer.timestamp_begin].max(
             axis=-1, keepdims=True
         )
-        mask[:, : self.tokenizer.timestamp_begin] = mx.where(
+        text_mask = mx.where(
             timestamp_logprob > max_text_token_logprob,
             -mx.inf,
             mask[:, : self.tokenizer.timestamp_begin],
+        )
+        mask = mx.concatenate(
+            [text_mask, mask[:, self.tokenizer.timestamp_begin :]], axis=-1
         )
         return logits + mask
 

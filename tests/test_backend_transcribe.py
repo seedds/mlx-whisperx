@@ -58,25 +58,26 @@ class BackendTranscribeTests(unittest.TestCase):
                     delattr(parent, attr)
 
     def _import_transcribe(self):
-        mx_module = sys.modules.setdefault("mlx", types.ModuleType("mlx"))
-        mx_core = sys.modules.setdefault("mlx.core", types.ModuleType("mlx.core"))
-        if not hasattr(mx_core, "array"):
-            mx_core.array = object
-        if not hasattr(mx_core, "Dtype"):
-            mx_core.Dtype = object
-        if not hasattr(mx_core, "float16"):
-            mx_core.float16 = "float16"
-        if not hasattr(mx_core, "float32"):
-            mx_core.float32 = "float32"
-        if not hasattr(mx_core, "stack"):
-            mx_core.stack = lambda items: list(items)
+        # Install fresh stubs rather than reusing whatever is already imported: another
+        # test module may have imported the real mlx, whose `stack` rejects these fakes.
+        # tearDown restores the originals.
+        mx_module = types.ModuleType("mlx")
+        mx_core = types.ModuleType("mlx.core")
+        mx_core.array = object
+        mx_core.Dtype = object
+        mx_core.float16 = "float16"
+        mx_core.float32 = "float32"
+        mx_core.stack = lambda items: list(items)
         mx_module.core = mx_core
+        sys.modules["mlx"] = mx_module
+        sys.modules["mlx.core"] = mx_core
         sys.modules.setdefault("tqdm", types.ModuleType("tqdm"))
 
         audio = sys.modules.setdefault(
             "mlx_whisperx.backend.mlx_whisper.audio",
             types.ModuleType("mlx_whisperx.backend.mlx_whisper.audio"),
         )
+        audio.CHUNK_LENGTH = 30
         audio.FRAMES_PER_SECOND = 50
         audio.HOP_LENGTH = 320
         audio.N_FRAMES = 3000
@@ -212,3 +213,25 @@ class BackendTranscribeTests(unittest.TestCase):
                 logprob_threshold=-1.0,
                 decode_options={"beam_size": 5, "patience": 1.0, "language": "en"},
             )
+
+    def test_oversized_chunks_are_rejected_instead_of_silently_trimmed(self):
+        transcribe = self._import_transcribe()
+
+        transcribe._reject_oversized_chunk(transcribe.N_SAMPLES)
+        with self.assertRaisesRegex(ValueError, "longer than the 30s decoder window"):
+            transcribe._reject_oversized_chunk(transcribe.N_SAMPLES + 1)
+
+    def test_short_chunks_pad_the_waveform_not_the_mel_features(self):
+        transcribe = self._import_transcribe()
+        audio = types.SimpleNamespace(shape=(transcribe.N_SAMPLES // 2,))
+        mel = mock.Mock()
+        transcribe.log_mel_spectrogram = mock.Mock(return_value=mel)
+        transcribe.pad_or_trim = mock.Mock(return_value=mel)
+
+        transcribe._chunk_log_mel_spectrogram(audio, n_mels=80, dtype="float16")
+
+        # Padding must happen in waveform space, where zero really is silence.
+        self.assertEqual(
+            transcribe.log_mel_spectrogram.call_args.kwargs["padding"],
+            transcribe.N_SAMPLES // 2,
+        )

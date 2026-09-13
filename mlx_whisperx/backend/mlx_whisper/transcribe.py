@@ -12,6 +12,7 @@ import numpy as np
 import tqdm
 
 from .audio import (
+    CHUNK_LENGTH,
     FRAMES_PER_SECOND,
     HOP_LENGTH,
     N_FRAMES,
@@ -88,6 +89,31 @@ def _audio_to_mx(audio: Union[str, np.ndarray, mx.array]) -> mx.array:
     if not isinstance(audio, mx.array):
         return mx.array(audio)
     return audio
+
+
+def _reject_oversized_chunk(num_samples: int) -> None:
+    """Fail loudly when a chunk cannot fit in one encoder window.
+
+    Chunk decoding trims features to a single 30-second window, so a longer chunk
+    would be silently truncated while still reporting its full duration.
+    """
+    if num_samples > N_SAMPLES:
+        raise ValueError(
+            f"Chunk is {num_samples / SAMPLE_RATE:.2f}s, longer than the "
+            f"{CHUNK_LENGTH}s decoder window. Split it before decoding."
+        )
+
+
+def _chunk_log_mel_spectrogram(audio: mx.array, n_mels: int, dtype: mx.Dtype) -> mx.array:
+    """Compute the padded mel window for a single chunk.
+
+    The waveform is padded with silence *before* feature extraction. Padding the mel
+    features instead would write zeros, which is not silence in normalized log-mel
+    space and gives the encoder wrong acoustic values for short chunks.
+    """
+    padding = max(0, N_SAMPLES - audio.shape[0])
+    mel = log_mel_spectrogram(audio, n_mels=n_mels, padding=padding)
+    return pad_or_trim(mel, N_FRAMES, axis=-2).astype(dtype)
 
 
 def _resolve_language(
@@ -217,6 +243,7 @@ def transcribe_chunk(
     temperature: Union[float, Tuple[float, ...]] = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
     compression_ratio_threshold: Optional[float] = 2.4,
     logprob_threshold: Optional[float] = -1.0,
+    no_speech_threshold: Optional[float] = 0.6,
     initial_prompt: Optional[str] = None,
     **decode_options,
 ) -> dict:
@@ -229,6 +256,7 @@ def transcribe_chunk(
         model_cache_only=model_cache_only,
     )
     audio = _audio_to_mx(audio)
+    _reject_oversized_chunk(audio.shape[0])
     duration = float(audio.shape[0] / SAMPLE_RATE)
     language = _resolve_language(model, audio, dtype, decode_options, verbose)
     task: str = decode_options.get("task", "transcribe")
@@ -239,8 +267,7 @@ def transcribe_chunk(
         task=task,
     )
 
-    mel = log_mel_spectrogram(audio, n_mels=model.dims.n_mels)
-    mel = pad_or_trim(mel, N_FRAMES, axis=-2).astype(dtype)
+    mel = _chunk_log_mel_spectrogram(audio, model.dims.n_mels, dtype)
     decode_kwargs = {**decode_options, "language": language}
     if initial_prompt is not None:
         decode_kwargs["prompt"] = initial_prompt
@@ -250,6 +277,7 @@ def transcribe_chunk(
         temperature=temperature,
         compression_ratio_threshold=compression_ratio_threshold,
         logprob_threshold=logprob_threshold,
+        no_speech_threshold=no_speech_threshold,
         decode_options=decode_kwargs,
     )
     tokens = np.array(result.tokens)
@@ -421,12 +449,13 @@ def transcribe_chunks_batched(
 
     mels: List[mx.array] = []
     durations: List[float] = []
+    frame_counts: List[int] = []
     for audio in audio_list:
         audio = _audio_to_mx(audio)
+        _reject_oversized_chunk(audio.shape[0])
         durations.append(float(audio.shape[0] / SAMPLE_RATE))
-        mel = log_mel_spectrogram(audio, n_mels=model.dims.n_mels)
-        mel = pad_or_trim(mel, N_FRAMES, axis=-2).astype(dtype)
-        mels.append(mel)
+        frame_counts.append(min(N_FRAMES, audio.shape[0] // HOP_LENGTH))
+        mels.append(_chunk_log_mel_spectrogram(audio, model.dims.n_mels, dtype))
 
     total_windows = len(mels)
     total_batches = (total_windows + max(1, batch_size) - 1) // max(1, batch_size)
@@ -483,7 +512,9 @@ def transcribe_chunks_batched(
                     model=model,
                     tokenizer=tokenizer,
                     mel=batch_mels[offset],
-                    num_frames=N_FRAMES,
+                    # DTW must see only the real audio frames; aligning against the
+                    # padded tail would stretch words past the chunk's duration.
+                    num_frames=frame_counts[chunk_index],
                     prepend_punctuations=prepend_punctuations,
                     append_punctuations=append_punctuations,
                     last_speech_timestamp=0.0,
@@ -713,6 +744,9 @@ def transcribe(
     ) as pbar:
         last_speech_timestamp = 0.0
         for seek_clip_start, seek_clip_end in seek_clips:
+            # Clips are disjoint, so decoding must jump to each clip start instead of
+            # continuing from wherever the previous clip happened to stop.
+            seek = max(seek, seek_clip_start)
             while seek < seek_clip_end:
                 # `seek` is measured in Mel frames. Convert it to seconds only when
                 # creating user-visible timestamps.
