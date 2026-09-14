@@ -221,6 +221,9 @@ Notes:
 - `--highlight_words` applies to `srt` and `vtt`.
 - `--hf_token` is only needed for gated pyannote models.
 
+Output filenames keep the full input stem, so `meeting.part1.wav` and `meeting.part2.wav`
+write `meeting.part1.json` and `meeting.part2.json` rather than colliding on one file.
+
 ## Python API
 
 ```python
@@ -340,9 +343,9 @@ VAD options:
 - `--vad_method pyannote`: require pyannote VAD and do not fall back.
 - `--vad_method silero`: use Silero VAD directly.
 - `--vad_onset`: VAD onset threshold.
-- `--vad_offset`: VAD offset threshold.
+- `--vad_offset`: VAD offset threshold. Silero applies this only when the installed version supports an offset threshold; otherwise it is ignored with a warning.
 - `--vad_model`: Hugging Face pyannote segmentation model used with `--vad_method pyannote`. Defaults to `pyannote/segmentation-3.0`.
-- `--chunk_size`: merged VAD chunk size in seconds.
+- `--chunk_size`: merged VAD chunk size in seconds. Must be `30` or less, because each chunk is decoded as one 30-second window. Speech longer than this is split across chunks.
 - `--no_vad`: transcribe the full file as one chunk.
 - `--clip_timestamps`: comma-separated clip start/end pairs in seconds. Requires `--no_vad`.
 - `--vad_dump_path`: write VAD chunks and settings to JSON.
@@ -357,12 +360,15 @@ When using the default `--vad_method silero`, or when the `--vad_method auto` pa
 export MLX_WHISPERX_SILERO_VAD_PATH=/path/to/snakers4_silero-vad
 ```
 
+When this variable is set it is authoritative: that checkout is the only one tried, and a
+missing or broken checkout raises instead of silently downloading a different copy.
+
 Alignment options:
 
 - `--no_align`: skip forced alignment.
 - `--allow_missing_alignment_deps`: continue without forced alignment when alignment dependencies are unavailable.
 - `--align_model`: override the alignment model.
-- `--interpolate_method`: `nearest`, `linear`, or `ignore`.
+- `--interpolate_method`: `nearest`, `linear`, or `ignore`. `ignore` leaves unalignable words without `start`/`end` instead of estimating them.
 - `--return_char_alignments`: include character alignments in JSON.
 
 Diarization options:
@@ -376,10 +382,13 @@ Diarization options:
 
 Subtitle options:
 
-- `--max_line_width`: target subtitle line width.
+- `--max_line_width`: target subtitle line width, counting the spaces between words.
 - `--max_line_count`: maximum lines per subtitle cue. Requires `--max_line_width`.
 - `--max_words_per_line`: maximum words per subtitle cue.
 - `--highlight_words`: underline the active word in SRT/VTT output.
+
+These limits apply whether or not forced alignment ran. With `--diarize`, a cue also ends
+at each speaker change, so one cue never mixes speakers under a single `[SPEAKER_XX]:` prefix.
 
 ## Examples
 
@@ -461,19 +470,49 @@ Process multiple files:
 mlx-whisperx first.wav second.wav third.wav --output_dir transcripts --output_format all
 ```
 
+A failing file does not stop the run: the remaining files are still transcribed, the error is
+printed, and the command exits nonzero at the end so scripts can detect the partial failure.
+
+## Output Formats
+
+| Format | Contents |
+| --- | --- |
+| `json` | Full result: segments, word timings, scores, and speakers when diarized. |
+| `srt`, `vtt` | Subtitle cues, honoring the subtitle options and optional word highlighting. |
+| `txt` | One line per segment, prefixed with `[SPEAKER_XX]:` when diarized. |
+| `tsv` | Tab-separated `start`, `end`, `speaker`, `text` with millisecond times. |
+| `aud` | Audacity label track: tab-separated start/end seconds and label text, no header. Speakers appear as `[[SPEAKER_XX]]`. |
+
+Import `.aud` into Audacity with **File -> Import -> Labels**.
+
 ## Current Behavior and Limitations
 
 - ASR decodes merged VAD chunks in batches of `--batch_size` (default 8); set `--batch_size 1` to decode serially.
 - Batching is disabled automatically when `--condition_on_previous_text` is set, because chunks then depend on each other.
 - `translate` skips forced alignment because alignment models are transcription-language specific.
 - Missing `torch`, `torchaudio`, or `transformers` still fail alignment by default; pass `--allow_missing_alignment_deps` to continue with ASR-only output instead.
-- `clip_timestamps` is only supported with `--no_vad` because VAD chunking changes the timing base before ASR runs.
+- `clip_timestamps` is only supported with `--no_vad` because VAD chunking changes the timing base before ASR runs. Clip ranges are decoded independently, so audio between them is skipped.
 - VAD chunks are capped at `--chunk_size` seconds, which must not exceed the 30-second decoder window; longer chunks are rejected rather than silently truncated.
 - The CLI exits nonzero when any input file fails, while still processing the remaining files.
+- `--condition_on_previous_text` prompts windows within a single VAD chunk. It does not carry context across VAD chunks, and it disables batching.
 - Pyannote VAD and diarization depend on a compatible PyTorch, torchaudio, pyannote installation, and Hugging Face model access when the selected model is gated. Without that stack, use the default `--vad_method silero` path or let `--vad_method auto` fall back to Silero VAD.
 - The vendored ASR backend lives under `mlx_whisperx.backend.mlx_whisper` so decoder behavior can be changed without modifying external reference repositories.
 
 ## Development Checks
+
+Run the test suite:
+
+```bash
+python -m pip install -e ".[dev]"
+python -m pytest tests -q
+```
+
+Most tests stub the ASR backend and model downloads, so they run quickly and offline. One
+regression test transcribes a bundled audio fixture with a real model and is opt-in:
+
+```bash
+MLX_WHISPERX_RUN_SAMPLE_TEST=1 python -m pytest tests/test_regression_transcribe_sample.py
+```
 
 Compile the package:
 
