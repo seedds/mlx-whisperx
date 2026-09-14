@@ -374,13 +374,17 @@ class BeamSearchDecoder(TokenDecoder):
                         sources[sequence] = beam_idx
 
             saved = 0
+            finished = self.finished_sequences[audio_idx]
             fallback_finished: List[Tuple[Tuple[int, ...], float]] = []
             for sequence in sorted(scores, key=scores.get, reverse=True):
                 score = scores[sequence]
                 if sequence[-1] == self.eot:
                     # Finished sequences count toward `max_candidates` but do not fill
                     # active beam slots unless too few unfinished candidates remain.
-                    self.finished_sequences[audio_idx][sequence] = score
+                    # Stop recording once the candidate list is full, otherwise a window
+                    # where every beam keeps finishing grows the dict without bound.
+                    if len(finished) < self.max_candidates:
+                        finished[sequence] = score
                     fallback_finished.append((sequence, score))
                     continue
 
@@ -428,18 +432,30 @@ class BeamSearchDecoder(TokenDecoder):
         all_tokens: List[List[Tuple[int, ...]]] = []
         all_scores: List[List[float]] = []
         for audio_idx in range(n_audio):
-            # Merge explicitly finished sequences with still-active beams forced to EOT.
+            # Sequences that actually emitted EOT are the real candidates. Active beams
+            # are only a fallback: they stopped because the window ran out of tokens, and
+            # being shorter they carry fewer negative logprobs, so admitting them
+            # unconditionally would let a truncated beam outrank a complete transcription.
             candidates: Dict[Tuple[int, ...], float] = {}
             if self.finished_sequences is not None:
                 candidates.update(self.finished_sequences[audio_idx])
 
-            for sequence, score in zip(tokens_list[audio_idx], sum_logprobs_list[audio_idx]):
-                sequence = tuple(int(token) for token in sequence)
-                if sequence[-1] != self.eot:
-                    sequence = sequence + (self.eot,)
-                candidates[sequence] = max(float(score), candidates.get(sequence, -np.inf))
+            if len(candidates) < self.beam_size:
+                ranked = sorted(
+                    zip(tokens_list[audio_idx], sum_logprobs_list[audio_idx]),
+                    key=lambda pair: pair[1],
+                    reverse=True,
+                )
+                for sequence, score in ranked:
+                    if len(candidates) >= self.beam_size:
+                        break
+                    sequence = tuple(int(token) for token in sequence)
+                    if sequence[-1] != self.eot:
+                        sequence = sequence + (self.eot,)
+                    if sequence not in candidates:
+                        candidates[sequence] = float(score)
 
-            selected = sorted(candidates, key=candidates.get, reverse=True)[: self.max_candidates]
+            selected = list(candidates)[: self.max_candidates]
             all_tokens.append(selected)
             all_scores.append([candidates[sequence] for sequence in selected])
 
@@ -449,8 +465,12 @@ class BeamSearchDecoder(TokenDecoder):
         padded_scores = []
         for group, scores in zip(all_tokens, all_scores):
             if len(group) < max_candidates:
-                group = group + [(self.eot,)] * (max_candidates - len(group))
-                scores = scores + [-np.inf] * (max_candidates - len(scores))
+                # Pad by repeating the weakest real candidate rather than inserting a
+                # bare EOT: an empty candidate decodes to empty text and its zero length
+                # divides by zero when the ranker length-normalises the score.
+                shortfall = max_candidates - len(group)
+                group = group + [group[-1]] * shortfall
+                scores = scores + [scores[-1]] * shortfall
             padded_tokens.append(
                 [
                     list(sequence) + [self.eot] * (max_len - len(sequence))
