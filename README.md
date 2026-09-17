@@ -347,6 +347,9 @@ VAD options:
 - `--vad_model`: Hugging Face pyannote segmentation model used with `--vad_method pyannote`. Defaults to `pyannote/segmentation-3.0`.
 - `--chunk_size`: merged VAD chunk size in seconds. Must be `30` or less, because each chunk is decoded as one 30-second window. Speech longer than this is split across chunks.
 - `--no_vad`: transcribe the full file as one chunk.
+- `--coverage`: choose chunks by audible energy instead of trusting the VAD alone. The VAD is still used, but only to locate pauses for chunk seams. Speech a VAD scores as non-speech — counting, chanting, singing, stylised delivery — is otherwise dropped with no output and no warning. This roughly doubles the audio sent to the decoder, and therefore the decode time, in exchange for a modest recall gain; leave it off unless you suspect speech is being dropped. Check the `Coverage:` line in the log to see how much of the file is reaching the decoder.
+- `--coverage_floor`: with `--coverage`, the energy floor as a fraction of the file's own measured speech level. Defaults to `0.20`. The scale is relative because absolute amplitude varies with source and mastering, so a fixed floor does not transfer between files. Lower values admit quieter audio and risk transcribing music; higher values risk discarding quiet speech.
+- `--min_silent_run`: with `--coverage`, seconds of continuous quiet required before coverage is broken. Defaults to `1.0`. Shorter runs are treated as pauses within speech rather than as gaps between it.
 - `--clip_timestamps`: comma-separated clip start/end pairs in seconds. Requires `--no_vad`.
 - `--vad_dump_path`: write VAD chunks and settings to JSON.
 
@@ -493,6 +496,7 @@ Import `.aud` into Audacity with **File -> Import -> Labels**.
 - Missing `torch`, `torchaudio`, or `transformers` still fail alignment by default; pass `--allow_missing_alignment_deps` to continue with ASR-only output instead.
 - `clip_timestamps` is only supported with `--no_vad` because VAD chunking changes the timing base before ASR runs. Clip ranges are decoded independently, so audio between them is skipped.
 - VAD chunks are capped at `--chunk_size` seconds, which must not exceed the 30-second decoder window; longer chunks are rejected rather than silently truncated.
+- Chunk text is dropped when the decoder scores it as non-speech above `--no_speech_threshold`, or when a single word makes up most of a long chunk. The latter is a decoder loop, which music and noise provoke — an opening theme can otherwise yield one word repeated hundreds of times as a single long cue. Emphatic real repetition is preserved; the loop test requires a majority of a long utterance to be one token. Drops are logged with their timestamp and reason.
 - The CLI exits nonzero when any input file fails, while still processing the remaining files.
 - `--condition_on_previous_text` prompts windows within a single VAD chunk. It does not carry context across VAD chunks, and it disables batching.
 - Pyannote VAD and diarization depend on a compatible PyTorch, torchaudio, pyannote installation, and Hugging Face model access when the selected model is gated. Without that stack, use the default `--vad_method silero` path or let `--vad_method auto` fall back to Silero VAD.

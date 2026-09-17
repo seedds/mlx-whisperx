@@ -69,6 +69,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vad_model", default=None, help="Hugging Face pyannote segmentation model used when --vad_method pyannote")
     parser.add_argument("--chunk_size", type=int, default=30, help="Merged VAD chunk size in seconds")
     parser.add_argument("--no_vad", action="store_true", help="Skip VAD and transcribe the full file as one chunk")
+    parser.add_argument("--coverage_floor", type=float, default=0.20, help="Audible-energy floor as a fraction of measured speech level")
+    parser.add_argument("--min_silent_run", type=float, default=1.0, help="Seconds of quiet required before coverage is broken")
+    parser.add_argument("--coverage", action="store_true", help="Gate transcription on audible energy instead of VAD alone, so speech the VAD misses is still decoded")
     parser.add_argument("--clip_timestamps", default=None, help="Comma-separated start,end,start,end,... timestamps in seconds. Requires --no_vad.")
     parser.add_argument("--vad_dump_path", default=None, help="Write VAD chunks and settings to this JSON path")
     parser.add_argument("--batch_size", type=int, default=8, help="Number of chunks decoded together; 1 disables batching")
@@ -81,7 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hf_token", default=None, help="Hugging Face token for gated pyannote models")
 
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature")
-    parser.add_argument("--temperature_increment_on_fallback", type=optional_float, default=None, help="Temperature fallback increment")
+    parser.add_argument("--temperature_increment_on_fallback", type=optional_float, default=0.2, help="Temperature fallback increment; None disables the ladder, leaving compression-ratio and logprob thresholds inert")
     parser.add_argument("--best_of", type=optional_int, default=5, help="Number of candidates when sampling with temperature > 0; ignored at temperature 0")
     parser.add_argument("--beam_size", type=optional_int, default=1, help="Beam size when temperature is zero")
     parser.add_argument("--patience", type=optional_float, default=1.0, help="Beam-search patience")

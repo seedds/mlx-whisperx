@@ -28,12 +28,24 @@ from .audio import SAMPLE_RATE, audio_to_numpy, slice_audio
 from .diarize import DiarizationPipeline, assign_word_speakers
 from .log_utils import get_logger
 from .vads import AUTO_VAD_METHOD, get_vad_class
+from .vads.coverage import (
+    audible_regions,
+    covered_seconds,
+    energy_pauses,
+    is_repetition_loop,
+    speech_level,
+)
+from .vads.vad import Vad
 
 
 logger = get_logger(__name__)
 NUMERAL_SYMBOLS = "0123456789%$£"
 # One Whisper encoder window; VAD chunks are decoded whole, so they cannot exceed it.
 MAX_CHUNK_SIZE = 30
+
+# Below this fraction of the file reaching the decoder, something is wrong with
+# speech detection rather than with the content.
+LOW_COVERAGE_WARNING = 0.5
 
 
 @lru_cache(maxsize=32)
@@ -108,6 +120,9 @@ class PipelineOptions:
     vad_model: Optional[str] = None
     chunk_size: int = 30
     no_vad: bool = False
+    coverage_floor: float = 0.20
+    min_silent_run: float = 1.0
+    coverage: bool = False
     batch_size: int = 8
     align_model: Optional[str] = None
     no_align: bool = False
@@ -256,15 +271,68 @@ class MLXWhisperXPipeline:
         vad_segments = vad_model({"waveform": waveform, "sample_rate": SAMPLE_RATE})
         if merge_chunks is None:
             raise TypeError("VAD model must provide merge_chunks")
-        chunks = merge_chunks(
-            vad_segments,
-            self.options.chunk_size,
-            onset=self.options.vad_onset,
-            offset=self.options.vad_offset,
-        )
+
+        def vad_only_chunks() -> list[dict]:
+            return merge_chunks(
+                vad_segments,
+                self.options.chunk_size,
+                onset=self.options.vad_onset,
+                offset=self.options.vad_offset,
+            )
+
+        if self.options.coverage:
+            chunks = self._coverage_chunks(audio, vad_segments, vad_only_chunks)
+        else:
+            chunks = vad_only_chunks()
+
         chunks = [chunk for chunk in chunks if chunk["end"] > chunk["start"]]
+        self._report_coverage(chunks, duration)
         self._dump_vad_chunks(chunks, duration, resolved_vad_method=resolved_vad_method)
         return chunks
+
+    def _coverage_chunks(self, audio: np.ndarray, vad_segments, vad_only_chunks) -> list[dict]:
+        """Plan chunks from audible energy, placing seams in energy dips.
+
+        Speech the VAD misses is otherwise dropped silently and unrecoverably,
+        so energy decides what is covered and sustained silence is the only
+        thing allowed to skip audio. Seams come from the same signal, since a
+        VAD that missed a passage cannot say where its pauses are.
+        """
+        level = speech_level(audio, vad_segments)
+        if level <= 0:
+            # No detected speech to measure against, so there is no scale for an
+            # energy floor. This is silence or a total VAD failure; either way
+            # the VAD's own answer is the only one available.
+            return vad_only_chunks()
+
+        floor = level * self.options.coverage_floor
+        regions = audible_regions(
+            audio,
+            floor=floor,
+            min_silent_run=self.options.min_silent_run,
+        )
+        return Vad.plan_chunks(
+            regions,
+            self.options.chunk_size,
+            cut_hints=vad_segments,
+            pauses=energy_pauses(audio, floor),
+        )
+
+    def _report_coverage(self, chunks: list[dict], duration: float) -> float:
+        """Log the fraction of the file that will reach the decoder.
+
+        Dropped audio is otherwise invisible: it produces no output, no warning,
+        and no diagnostic, so a VAD regression looks identical to silence.
+        """
+        covered = covered_seconds((chunk["start"], chunk["end"]) for chunk in chunks)
+        coverage = covered / duration if duration > 0 else 0.0
+        message = "Coverage: %.1f%% of %.0fs in %d chunks"
+        if coverage < LOW_COVERAGE_WARNING:
+            logger.warning(message + " -- most of the audio will not be transcribed",
+                           coverage * 100, duration, len(chunks))
+        else:
+            logger.info(message, coverage * 100, duration, len(chunks))
+        return coverage
 
     def _load_vad_model(self) -> tuple[str, object]:
         """Instantiate the configured VAD backend, applying default fallback once."""
@@ -309,6 +377,7 @@ class MLXWhisperXPipeline:
         if not self.options.vad_dump_path:
             return
 
+        covered = covered_seconds((chunk["start"], chunk["end"]) for chunk in chunks)
         payload = {
             "vad_method": resolved_vad_method or self.options.vad_method,
             "requested_vad_method": self.options.vad_method,
@@ -320,6 +389,8 @@ class MLXWhisperXPipeline:
             "no_vad": self.options.no_vad,
             "audio_duration": round(audio_duration, 3),
             "chunk_count": len(chunks),
+            "covered_seconds": round(covered, 3),
+            "coverage": round(covered / audio_duration, 4) if audio_duration > 0 else 0.0,
             "chunks": [
                 {
                     "index": index,
@@ -485,7 +556,7 @@ class MLXWhisperXPipeline:
 
             chunk_result = self._mlx_whisper.transcribe_chunk(chunk_audio, **chunk_kwargs)
             chunk_segments = []
-            if chunk_result.get("text", "").strip():
+            if self._keep_chunk_text(chunk_result, start):
                 chunk_segments = [
                     self._restore_vad_chunk_segment(chunk_result, speech_segments, end - start)
                 ]
@@ -539,7 +610,7 @@ class MLXWhisperXPipeline:
         total = len(chunk_results)
         for idx, (meta, chunk_result) in enumerate(zip(prepared, chunk_results)):
             chunk_segments = []
-            if chunk_result.get("text", "").strip():
+            if self._keep_chunk_text(chunk_result, meta["start"]):
                 chunk_segments = [
                     self._restore_vad_chunk_segment(
                         chunk_result,
@@ -575,6 +646,40 @@ class MLXWhisperXPipeline:
             )
 
         return _callback
+
+    def _keep_chunk_text(self, chunk_result: dict, start: float) -> bool:
+        """Decide whether a decoded chunk's text should be emitted at all.
+
+        The decoder's own quality signals gate only the temperature retry, never
+        the output, so a chunk can be recognised as non-speech and still have its
+        text emitted. Worse, a high `no_speech_prob` actively *suppresses* the
+        retry (silence being a valid outcome), which is exactly the case that
+        needs rejecting: music scored as non-speech, decoded into a repetition
+        loop, and published because the text was non-empty.
+        """
+        text = chunk_result.get("text", "").strip()
+        if not text:
+            return False
+
+        reason = None
+        no_speech = chunk_result.get("no_speech_prob")
+        threshold = self.options.no_speech_threshold
+        if threshold is not None and no_speech is not None and no_speech > threshold:
+            reason = f"no_speech_prob={no_speech:.2f} > {threshold}"
+        elif is_repetition_loop(text):
+            reason = "repetition loop"
+
+        if reason is None:
+            return True
+
+        logger.warning(
+            "Dropping chunk at %02d:%05.2f (%s): %.60s",
+            int(start) // 60,
+            start % 60,
+            reason,
+            text,
+        )
+        return False
 
     def _speech_only_chunk_audio(self, audio: np.ndarray, chunk: dict) -> np.ndarray:
         """Concatenate only the voiced regions inside one VAD chunk."""

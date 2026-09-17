@@ -178,6 +178,45 @@ class CLITests(unittest.TestCase):
 
         self.assertEqual(exc.exception.code, 2)
 
+    def test_every_cli_option_is_accepted_by_transcribe(self):
+        """Guard the CLI -> transcribe() -> PipelineOptions chain.
+
+        `main` forwards parsed arguments as keywords, so an option added to the
+        parser but not to `transcribe` raises TypeError only at runtime, after a
+        model has already been loaded.
+        """
+        import inspect
+
+        from mlx_whisperx.pipeline import PipelineOptions
+        from mlx_whisperx.transcribe import transcribe
+
+        parser = cli.build_parser()
+        options = {
+            action.dest
+            for action in parser._actions
+            if action.dest not in {"help", "audio"}
+        }
+        # Options `main` consumes itself -- writer settings, logging, and flags
+        # translated into a different keyword -- rather than forwarding.
+        translated = {
+            "compute_type",
+            "temperature_increment_on_fallback",
+            "log_level",
+            "output_dir",
+            "output_format",
+            "output_name",
+            "highlight_words",
+            "max_line_count",
+            "max_line_width",
+            "max_words_per_line",
+        }
+        accepted = set(inspect.signature(transcribe).parameters)
+        self.assertEqual(set(), options - translated - accepted)
+
+        pipeline_fields = set(PipelineOptions.__dataclass_fields__)
+        forwarded = accepted - {"audio", "output_dir", "output_format", "output_name"}
+        self.assertEqual(set(), forwarded - pipeline_fields)
+
     def test_output_name_is_rejected_for_multiple_inputs(self):
         argv = ["mlx-whisperx", "a.wav", "b.wav", "--output_name", "combined"]
         with mock.patch.object(sys, "argv", argv):
