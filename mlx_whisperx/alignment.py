@@ -392,10 +392,11 @@ def align(
 
         char_segments_arr = []
         word_idx = 0
+        clean_index_of = {cdx: idx for idx, cdx in enumerate(segment_data[sdx]["clean_cdx"])}
         for cdx, char in enumerate(text):
             start, end, score = None, None, None
-            if cdx in segment_data[sdx]["clean_cdx"]:
-                clean_idx = segment_data[sdx]["clean_cdx"].index(cdx)
+            clean_idx = clean_index_of.get(cdx)
+            if clean_idx is not None:
                 char_seg = char_segments[clean_idx]
                 start = round(char_seg.start * ratio + t1, 3)
                 end = round(char_seg.end * ratio + t1, 3)

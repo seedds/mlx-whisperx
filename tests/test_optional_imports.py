@@ -5,7 +5,7 @@ from unittest import mock
 
 import mlx_whisperx
 from mlx_whisperx.alignment import AlignmentDependencyError, load_align_model
-from mlx_whisperx._compat import patch_torchaudio_for_pyannote
+from mlx_whisperx._compat import hf_offline, patch_torchaudio_for_pyannote
 from mlx_whisperx import DiarizationPipeline
 from mlx_whisperx.vads._pyannote_impl import _voice_activity_hyperparameters
 from mlx_whisperx.vads.pyannote import Pyannote
@@ -52,6 +52,16 @@ class OptionalImportTests(unittest.TestCase):
 
         self.assertTrue(hasattr(torchaudio, "list_audio_backends"))
         self.assertEqual(torchaudio.list_audio_backends(), ["soundfile"])
+
+    def test_hf_offline_patches_already_imported_hub_constant(self):
+        # The Hub caches HF_HUB_OFFLINE at import time; setting only the environment
+        # variable after import leaves downloads enabled.
+        from huggingface_hub import constants
+
+        original = constants.HF_HUB_OFFLINE
+        with hf_offline(True):
+            self.assertTrue(constants.HF_HUB_OFFLINE)
+        self.assertEqual(constants.HF_HUB_OFFLINE, original)
 
     def test_root_package_exports_diarization_helpers(self):
         self.assertTrue(hasattr(mlx_whisperx, "DiarizationPipeline"))

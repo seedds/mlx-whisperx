@@ -112,7 +112,7 @@ class _Binarize:
         self.annotation_cls = annotation_cls
         self.segment_cls = segment_cls
         self.onset = onset
-        self.offset = offset or onset
+        self.offset = onset if offset is None else offset
         self.max_duration = max_duration
 
     def __call__(self, scores):

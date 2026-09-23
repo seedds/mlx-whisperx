@@ -26,3 +26,10 @@ class PyprojectTests(unittest.TestCase):
         self.assertIn('"torchaudio==2.11.*"', dependencies)
         self.assertIn('"transformers>=5,<6"', dependencies)
         self.assertNotIn('"torchvision"', dependencies)
+
+    def test_silero_vad_is_a_pinned_package(self):
+        # Silero once loaded unpinned remote code from GitHub master via torch.hub.
+        content = Path("pyproject.toml").read_text(encoding="utf-8")
+        project_dependencies = re.search(r"dependencies = \[(.*?)\]\n\n", content, re.S)
+
+        self.assertIn('"silero-vad>=5.1,<7"', project_dependencies.group(1))

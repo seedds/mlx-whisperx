@@ -159,7 +159,11 @@ def main() -> None:
     if increment is not None:
         # Match Whisper's fallback behavior by trying a temperature ladder when the
         # backend reports repetition or low-confidence failures.
-        args["temperature"] = tuple(np.arange(args["temperature"], 1.0 + 1e-6, increment))
+        # A starting temperature above 1.0 leaves the ladder empty, which would mean
+        # no decode attempt at all, so the requested temperature is always tried.
+        args["temperature"] = tuple(np.arange(args["temperature"], 1.0 + 1e-6, increment)) or (
+            args["temperature"],
+        )
 
     audio_files = args.pop("audio")
     if output_name and len(audio_files) > 1:

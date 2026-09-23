@@ -338,10 +338,9 @@ Precision and model-cache options:
 
 VAD options:
 
-- `--vad_method silero`: default VAD mode.
 - `--vad_method auto`: prefer pyannote and fall back to Silero if pyannote cannot initialize.
 - `--vad_method pyannote`: require pyannote VAD and do not fall back.
-- `--vad_method silero`: use Silero VAD directly.
+- `--vad_method silero`: use Silero VAD directly. This is the default.
 - `--vad_onset`: VAD onset threshold.
 - `--vad_offset`: VAD offset threshold. Silero applies this only when the installed version supports an offset threshold; otherwise it is ignored with a warning.
 - `--vad_model`: Hugging Face pyannote segmentation model used with `--vad_method pyannote`. Defaults to `pyannote/segmentation-3.0`.
@@ -357,7 +356,7 @@ Batching options:
 
 - `--batch_size`: number of chunks decoded together in one pass. Defaults to `8`. Higher values are faster but use more memory; `1` disables batching. Batching is skipped automatically when `--condition_on_previous_text` is set.
 
-When using the default `--vad_method silero`, or when the `--vad_method auto` path falls back to Silero, Silero loads from the local Torch Hub cache first. To force a local Silero checkout, set:
+When using the default `--vad_method silero`, or when the `--vad_method auto` path falls back to Silero, Silero loads from the pinned `silero-vad` package, which ships its weights and needs no network access. To use a local Silero checkout instead, set:
 
 ```bash
 export MLX_WHISPERX_SILERO_VAD_PATH=/path/to/snakers4_silero-vad
@@ -496,7 +495,7 @@ Import `.aud` into Audacity with **File -> Import -> Labels**.
 - Missing `torch`, `torchaudio`, or `transformers` still fail alignment by default; pass `--allow_missing_alignment_deps` to continue with ASR-only output instead.
 - `clip_timestamps` is only supported with `--no_vad` because VAD chunking changes the timing base before ASR runs. Clip ranges are decoded independently, so audio between them is skipped.
 - VAD chunks are capped at `--chunk_size` seconds, which must not exceed the 30-second decoder window; longer chunks are rejected rather than silently truncated.
-- Chunk text is dropped when the decoder scores it as non-speech above `--no_speech_threshold`, or when a single word makes up most of a long chunk. The latter is a decoder loop, which music and noise provoke — an opening theme can otherwise yield one word repeated hundreds of times as a single long cue. Emphatic real repetition is preserved; the loop test requires a majority of a long utterance to be one token. Drops are logged with their timestamp and reason.
+- Chunk text is dropped when the decoder scores it as non-speech above `--no_speech_threshold` and its average log probability is below `--logprob_threshold` (Whisper's silence rule), or when a single word makes up most of a long chunk. The latter is a decoder loop, which music and noise provoke — an opening theme can otherwise yield one word repeated hundreds of times as a single long cue. Emphatic real repetition is preserved; the loop test requires a majority of a long utterance to be one token. Drops are logged with their timestamp and reason.
 - The CLI exits nonzero when any input file fails, while still processing the remaining files.
 - `--condition_on_previous_text` prompts windows within a single VAD chunk. It does not carry context across VAD chunks, and it disables batching.
 - Pyannote VAD and diarization depend on a compatible PyTorch, torchaudio, pyannote installation, and Hugging Face model access when the selected model is gated. Without that stack, use the default `--vad_method silero` path or let `--vad_method auto` fall back to Silero VAD.

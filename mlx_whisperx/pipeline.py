@@ -161,15 +161,23 @@ class MLXWhisperXPipeline:
         """Execute the full configured pipeline for a path or waveform."""
         if self.options.clip_timestamps is not None and not self.options.no_vad:
             raise ValueError("clip_timestamps requires no_vad=True")
-        if not self.options.no_vad and self.options.chunk_size > MAX_CHUNK_SIZE:
+        if not self.options.no_vad and not 0 < self.options.chunk_size <= MAX_CHUNK_SIZE:
             # Chunks are decoded as one encoder window, so a larger chunk would lose
-            # everything past the window instead of being transcribed.
+            # everything past the window instead of being transcribed, and a
+            # non-positive one would produce no chunks at all.
             raise ValueError(
-                f"chunk_size must be at most {MAX_CHUNK_SIZE} seconds, got {self.options.chunk_size}"
+                f"chunk_size must be between 1 and {MAX_CHUNK_SIZE} seconds, got {self.options.chunk_size}"
             )
+        if self.options.batch_size < 1:
+            raise ValueError(f"batch_size must be at least 1, got {self.options.batch_size}")
+        if (
+            self.options.min_speakers is not None
+            and self.options.max_speakers is not None
+            and self.options.min_speakers > self.options.max_speakers
+        ):
+            raise ValueError("min_speakers must not exceed max_speakers")
 
         audio_np = audio_to_numpy(audio)
-        audio_path = audio if isinstance(audio, str) else None
 
         vad_chunks = self._vad_chunks(audio_np)
         if not vad_chunks:
@@ -198,7 +206,7 @@ class MLXWhisperXPipeline:
                 )
 
         if self.options.diarize:
-            result = self._diarize(result, audio_path or audio_np)
+            result = self._diarize(result, audio_np)
 
         return self._normalize_result(result)
 
@@ -259,18 +267,11 @@ class MLXWhisperXPipeline:
 
         resolved_vad_method, vad_model = self._load_vad_model()
 
-        if hasattr(vad_model, "preprocess_audio"):
-            # Silero accepts NumPy directly; pyannote expects a Torch waveform. The
-            # backend owns conversion so this pipeline can stay backend-agnostic.
-            waveform = vad_model.preprocess_audio(audio)
-            merge_chunks = vad_model.merge_chunks
-        else:
-            waveform = audio
-            merge_chunks = None
-
+        # Silero accepts NumPy directly; pyannote expects a Torch waveform. The
+        # backend owns conversion so this pipeline can stay backend-agnostic.
+        waveform = vad_model.preprocess_audio(audio)
+        merge_chunks = vad_model.merge_chunks
         vad_segments = vad_model({"waveform": waveform, "sample_rate": SAMPLE_RATE})
-        if merge_chunks is None:
-            raise TypeError("VAD model must provide merge_chunks")
 
         def vad_only_chunks() -> list[dict]:
             return merge_chunks(
@@ -527,7 +528,7 @@ class MLXWhisperXPipeline:
         language = self.options.language
         if language is None:
             language = self._mlx_whisper.detect_language(
-                audio,
+                self._language_detection_audio(audio, vad_chunks),
                 path_or_hf_repo=self.options.model,
                 model_dir=self.options.model_dir,
                 model_cache_only=self.options.model_cache_only,
@@ -566,6 +567,25 @@ class MLXWhisperXPipeline:
                 print(f"Progress: {((idx + 1) / total) * 50:.2f}%...")
 
         return {"segments": all_segments, "language": language or "en"}
+
+    def _language_detection_audio(self, audio: np.ndarray, vad_chunks: list[dict]) -> np.ndarray:
+        """Return up to one decoder window of detected speech for language detection.
+
+        Detection only sees the first 30 seconds of what it is given. Feeding it the
+        raw file lets an intro of music or silence decide the language; feeding it the
+        VAD speech keeps the decision on actual dialogue.
+        """
+        window = MAX_CHUNK_SIZE * SAMPLE_RATE
+        pieces: list[np.ndarray] = []
+        collected = 0
+        for chunk in vad_chunks:
+            piece = self._speech_only_chunk_audio(audio, chunk)
+            pieces.append(piece)
+            collected += piece.size
+            if collected >= window:
+                break
+        speech = np.concatenate(pieces) if pieces else np.array([], dtype=np.float32)
+        return speech[:window] if speech.size else audio[:window]
 
     def _asr_with_vad_batched(
         self,
@@ -664,7 +684,16 @@ class MLXWhisperXPipeline:
         reason = None
         no_speech = chunk_result.get("no_speech_prob")
         threshold = self.options.no_speech_threshold
-        if threshold is not None and no_speech is not None and no_speech > threshold:
+        avg_logprob = chunk_result.get("avg_logprob")
+        logprob_threshold = self.options.logprob_threshold
+        # Match Whisper's silence rule: a high no-speech score alone is not enough,
+        # because quiet or stylised speech that decoded confidently is still speech.
+        confident = (
+            logprob_threshold is not None
+            and avg_logprob is not None
+            and avg_logprob > logprob_threshold
+        )
+        if threshold is not None and no_speech is not None and no_speech > threshold and not confident:
             reason = f"no_speech_prob={no_speech:.2f} > {threshold}"
         elif is_repetition_loop(text):
             reason = "repetition loop"
@@ -806,7 +835,7 @@ class MLXWhisperXPipeline:
         aligned["language"] = language
         return aligned
 
-    def _diarize(self, result: dict, audio: str | np.ndarray) -> dict:
+    def _diarize(self, result: dict, audio: np.ndarray) -> dict:
         """Run pyannote diarization and attach dominant speaker labels to words."""
         logger.info("Performing diarization...")
         if self.options.hf_token is None:

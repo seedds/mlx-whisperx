@@ -13,16 +13,6 @@ from .vad import Segment, Vad
 
 logger = get_logger(__name__)
 SILERO_VAD_ENV_PATH = "MLX_WHISPERX_SILERO_VAD_PATH"
-SILERO_VAD_REMOTE_REPO = "snakers4/silero-vad:master"
-
-
-def _silero_cache_candidates() -> list[Path]:
-    """Return local paths that may contain a Silero Torch Hub checkout."""
-    hub_dir = Path(torch.hub.get_dir()).expanduser()
-    return [
-        hub_dir / "snakers4_silero-vad_master",
-        hub_dir / "snakers4_silero-vad_main",
-    ]
 
 
 def _load_silero_checkout(path: Path):
@@ -38,12 +28,12 @@ def _load_silero_checkout(path: Path):
     )
 
 
-def _load_silero_from_cache():
-    """Load Silero from a local checkout when possible.
+def _load_silero():
+    """Return `(model, get_speech_timestamps)` for Silero VAD.
 
-    Prefer local cache to avoid network access during normal CLI runs. An explicit
-    environment path is authoritative: it is the only candidate tried, and its failure
-    is raised rather than hidden behind another checkout or a silent download.
+    The pinned `silero-vad` package ships its weights, so the default path needs no
+    network access and no remote code. An explicit environment path is authoritative:
+    it is the only source tried, and its failure is raised rather than hidden.
     """
     env_path = os.environ.get(SILERO_VAD_ENV_PATH)
     if env_path:
@@ -53,40 +43,26 @@ def _load_silero_from_cache():
                 f"${SILERO_VAD_ENV_PATH} is set to {path}, which has no hubconf.py."
             )
         try:
-            return _load_silero_checkout(path)
+            model, utils = _load_silero_checkout(path)
         except Exception as exc:
             raise RuntimeError(f"Failed to load Silero VAD from ${SILERO_VAD_ENV_PATH}.") from exc
+        return model, utils[0]
 
-    for path in _silero_cache_candidates():
-        if not (path / "hubconf.py").exists():
-            continue
-        try:
-            return _load_silero_checkout(path)
-        except Exception:
-            continue
-    return None
+    from silero_vad import get_speech_timestamps, load_silero_vad
+
+    return load_silero_vad(onnx=False), get_speech_timestamps
 
 
 class Silero(Vad):
     """Silero-backed VAD adapter with the same interface as pyannote VAD."""
 
     def __init__(self, **kwargs):
-        """Load Silero from local cache or Torch Hub."""
+        """Load Silero from the installed package or an explicit local checkout."""
         super().__init__(kwargs["vad_onset"])
         self.vad_onset = kwargs["vad_onset"]
         self.vad_offset = kwargs.get("vad_offset")
         self.chunk_size = kwargs["chunk_size"]
-        silero = _load_silero_from_cache() or torch.hub.load(
-            repo_or_dir=SILERO_VAD_REMOTE_REPO,
-            model="silero_vad",
-            force_reload=False,
-            onnx=False,
-            trust_repo=True,
-            skip_validation=True,
-            verbose=False,
-        )
-        self.vad_pipeline, vad_utils = silero
-        self.get_speech_timestamps = vad_utils[0]
+        self.vad_pipeline, self.get_speech_timestamps = _load_silero()
 
     def _offset_kwargs(self) -> dict:
         """Return Silero's offset threshold argument when this version supports it.

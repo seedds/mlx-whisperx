@@ -117,6 +117,19 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "clip_timestamps requires no_vad=True"):
             pipeline.transcribe(np.zeros(16000, dtype=np.float32))
 
+    def test_pipeline_rejects_invalid_sizes_before_loading_audio(self):
+        cases = [
+            ({"chunk_size": 0}, "chunk_size"),
+            ({"batch_size": 0}, "batch_size"),
+            ({"min_speakers": 3, "max_speakers": 2}, "min_speakers"),
+        ]
+        for overrides, message in cases:
+            with self.subTest(**overrides):
+                with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=mock.Mock()):
+                    pipeline = MLXWhisperXPipeline(PipelineOptions(**overrides))
+                with self.assertRaisesRegex(ValueError, message):
+                    pipeline.transcribe(np.zeros(16000, dtype=np.float32))
+
     def test_asr_forwards_cache_and_clip_options_to_backend(self):
         fake_backend = mock.Mock()
         fake_backend.transcribe.return_value = {
@@ -215,6 +228,20 @@ class PipelineTests(unittest.TestCase):
         fake_backend.detect_language.assert_called_once()
         self.assertEqual(fake_backend.transcribe_chunk.call_count, 2)
         fake_backend.transcribe.assert_not_called()
+
+    def test_language_is_detected_from_vad_speech_not_file_start(self):
+        fake_backend = mock.Mock()
+        fake_backend.detect_language.return_value = "en"
+        fake_backend.transcribe_chunk.return_value = {"start": 0.0, "end": 1.0, "text": "hi"}
+        with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
+            pipeline = MLXWhisperXPipeline(PipelineOptions(batch_size=1))
+
+        # A 40s non-speech intro followed by speech the VAD found at 40-41s.
+        audio = np.arange(16000 * 45, dtype=np.float32)
+        pipeline._asr(audio, [{"start": 40.0, "end": 41.0, "segments": [(40.0, 41.0)]}])
+
+        detection_audio = fake_backend.detect_language.call_args.args[0]
+        np.testing.assert_array_equal(detection_audio, audio[16000 * 40 : 16000 * 41])
 
     def test_asr_with_vad_compacts_inner_speech_segments_before_decoding(self):
         fake_backend = mock.Mock()
@@ -506,7 +533,7 @@ class PipelineOptionForwardingTests(unittest.TestCase):
     def test_chunk_size_larger_than_the_decoder_window_is_rejected(self):
         with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=mock.Mock()):
             pipeline = MLXWhisperXPipeline(PipelineOptions(chunk_size=60))
-            with self.assertRaisesRegex(ValueError, "chunk_size must be at most 30"):
+            with self.assertRaisesRegex(ValueError, "chunk_size must be between 1 and 30"):
                 pipeline.transcribe(np.zeros(16000, dtype=np.float32))
 
     def test_no_vad_allows_a_larger_chunk_size(self):

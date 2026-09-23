@@ -247,6 +247,21 @@ class ChunkTextGateTests(unittest.TestCase):
         self.assertFalse(
             pipeline._keep_chunk_text({"text": "A line of dialogue", "no_speech_prob": 0.9}, 0.0)
         )
+        self.assertFalse(
+            pipeline._keep_chunk_text(
+                {"text": "A line of dialogue", "no_speech_prob": 0.9, "avg_logprob": -1.5}, 0.0
+            )
+        )
+
+    def test_confident_text_over_detected_non_speech_is_kept(self):
+        # Whisper's silence rule: a confident decode overrides a high no-speech score.
+        pipeline = self.pipeline()
+
+        self.assertTrue(
+            pipeline._keep_chunk_text(
+                {"text": "One, two, three, four!", "no_speech_prob": 0.9, "avg_logprob": -0.3}, 0.0
+            )
+        )
 
     def test_empty_text_is_dropped(self):
         pipeline = self.pipeline()

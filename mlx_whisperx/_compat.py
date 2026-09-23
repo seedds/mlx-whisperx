@@ -10,21 +10,28 @@ def hf_offline(enabled: bool):
     """Force Hugging Face Hub offline for libraries without a cache-only argument.
 
     Pyannote loads models through the Hub but exposes no `local_files_only` flag, so
-    the environment variable is the only way to honor `--model_cache_only` there.
+    offline mode is the only way to honor `--model_cache_only` there. The Hub reads
+    `HF_HUB_OFFLINE` into a module constant once at import, and the ASR backend has
+    usually imported it already, so the constant is patched alongside the variable.
     """
     if not enabled:
         yield
         return
 
-    previous = os.environ.get("HF_HUB_OFFLINE")
+    from huggingface_hub import constants
+
+    previous_env = os.environ.get("HF_HUB_OFFLINE")
+    previous_constant = constants.HF_HUB_OFFLINE
     os.environ["HF_HUB_OFFLINE"] = "1"
+    constants.HF_HUB_OFFLINE = True
     try:
         yield
     finally:
-        if previous is None:
+        constants.HF_HUB_OFFLINE = previous_constant
+        if previous_env is None:
             os.environ.pop("HF_HUB_OFFLINE", None)
         else:
-            os.environ["HF_HUB_OFFLINE"] = previous
+            os.environ["HF_HUB_OFFLINE"] = previous_env
 
 
 def patch_torchaudio_for_pyannote(torchaudio_module) -> None:

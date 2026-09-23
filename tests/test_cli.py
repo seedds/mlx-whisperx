@@ -178,6 +178,24 @@ class CLITests(unittest.TestCase):
 
         self.assertEqual(exc.exception.code, 2)
 
+    def test_temperature_above_ladder_top_is_still_decoded(self):
+        calls: list[dict] = []
+
+        def fake_transcribe(audio_path, **kwargs):
+            calls.append(kwargs)
+            return {"segments": [], "word_segments": [], "language": "en"}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            argv = ["mlx-whisperx", "audio.wav", "--output_dir", tmpdir, "--temperature", "1.2"]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch("mlx_whisperx.cli.transcribe", side_effect=fake_transcribe),
+                mock.patch("mlx_whisperx.cli.get_writer", return_value=mock.Mock()),
+            ):
+                cli.main()
+
+        self.assertEqual(calls[0]["temperature"], (1.2,))
+
     def test_every_cli_option_is_accepted_by_transcribe(self):
         """Guard the CLI -> transcribe() -> PipelineOptions chain.
 
