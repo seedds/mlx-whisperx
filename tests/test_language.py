@@ -65,7 +65,9 @@ class LanguageTests(unittest.TestCase):
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            with mock.patch("mlx_whisperx.transcribe.MLXWhisperXPipeline", FakePipeline):
+            # Patch the module object: on Python 3.10 a dotted target resolves
+            # `mlx_whisperx.transcribe` to the re-exported function, not the module.
+            with mock.patch.object(api, "MLXWhisperXPipeline", FakePipeline):
                 result = api.transcribe("audio.wav", model="tiny.en", language="German")
 
         self.assertEqual(result["language"], "en")
