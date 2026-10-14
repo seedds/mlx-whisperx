@@ -1,8 +1,9 @@
 import unittest
+from unittest import mock
 
 import pandas as pd
 
-from mlx_whisperx.alignment import _sentence_spans, interpolate_nans
+from mlx_whisperx.alignment import _load_sentence_splitter, _sentence_spans, interpolate_nans
 
 
 class InterpolateNansTests(unittest.TestCase):
@@ -32,3 +33,14 @@ class SentenceSpanTests(unittest.TestCase):
 
     def test_empty_text_yields_one_span(self):
         self.assertEqual(_sentence_spans("", None), [(0, 0)])
+
+    def test_failed_punkt_download_falls_back_with_an_install_hint(self):
+        with (
+            mock.patch("nltk.data.load", side_effect=LookupError("missing")),
+            mock.patch("nltk.download", return_value=False),
+            self.assertLogs("mlx_whisperx.alignment", level="WARNING") as logs,
+        ):
+            splitter = _load_sentence_splitter("en")
+
+        self.assertIsNone(splitter)
+        self.assertIn("python -m nltk.downloader punkt_tab", logs.output[0])

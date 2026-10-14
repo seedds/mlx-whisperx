@@ -144,7 +144,8 @@ def _load_sentence_splitter(language: str):
             return nltk_load(f"tokenizers/punkt_tab/{punkt_lang}.pickle")
     except Exception as exc:
         logger.warning(
-            "Punkt sentence splitting unavailable (%s); falling back to punctuation splitting.",
+            "Punkt sentence splitting unavailable (%s); falling back to punctuation splitting. "
+            "Install the data manually with: python -m nltk.downloader punkt_tab",
             exc,
         )
         return None

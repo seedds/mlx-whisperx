@@ -5,7 +5,7 @@
 import sys
 import time
 import warnings
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Sequence, Tuple, Union
 
 import mlx.core as mx
 import numpy as np
@@ -292,6 +292,7 @@ def transcribe_chunk(
         "avg_logprob": result.avg_logprob,
         "compression_ratio": result.compression_ratio,
         "no_speech_prob": result.no_speech_prob,
+        "temperature": result.temperature,
         "language": language,
     }
 
@@ -351,11 +352,14 @@ def _decode_batch_with_fallback(
     logprob_threshold: Optional[float],
     no_speech_threshold: Optional[float],
     decode_options: dict,
+    prompts: Optional[List[List[int]]] = None,
 ) -> List[DecodingResult]:
     """Decode a batch of Mel windows, re-batching only the windows that fail thresholds.
 
     This mirrors `_decode_with_fallback` but evaluates the fallback heuristics per window
     so a single hot-temperature retry does not penalize windows that already decoded well.
+    `prompts`, when given, holds one prompt per window and follows each window into the
+    retry batches.
     """
     temperatures = [temperature] if isinstance(temperature, (int, float)) else list(temperature)
     n = int(mels.shape[0])
@@ -371,6 +375,8 @@ def _decode_batch_with_fallback(
             kwargs.pop("patience", None)
         else:
             kwargs.pop("best_of", None)
+        if prompts is not None:
+            kwargs["prompts"] = [prompts[i] for i in pending]
 
         sub_mels = mx.stack([mels[i] for i in pending])
         sub_results = _decode_batch_once(model, sub_mels, kwargs, t)
@@ -391,6 +397,27 @@ def _decode_batch_with_fallback(
     return [result for result in results if result is not None]
 
 
+def _compose_chunk_prompts(
+    tokenizer,
+    initial_prompt: Optional[str],
+    context_tokens: Sequence[Sequence[int]],
+    n_text_ctx: int,
+) -> List[List[int]]:
+    """Build one prompt per chunk: the initial prompt, then that chunk's own context.
+
+    The decoder keeps only the tail of an over-long prompt, which would push the initial
+    prompt out first, so the context is trimmed here to the room the initial prompt leaves.
+    """
+    initial = tokenizer.encode(" " + initial_prompt.strip()) if initial_prompt else []
+    budget = n_text_ctx // 2 - 1 - len(initial)
+    prompts = []
+    for context in context_tokens:
+        text_tokens = [token for token in context if token < tokenizer.eot]
+        # `[-0:]` would keep everything, so an exhausted budget must be explicit.
+        prompts.append(initial + (text_tokens[-budget:] if budget > 0 else []))
+    return prompts
+
+
 def transcribe_chunks_batched(
     audio_list: List[Union[np.ndarray, mx.array]],
     *,
@@ -407,6 +434,7 @@ def transcribe_chunks_batched(
     prepend_punctuations: str = "\"'“¿([{-",
     append_punctuations: str = "\"'.。,，!！?？:：”)]}、",
     progress_callback: Optional[Callable[[dict], None]] = None,
+    context_tokens: Optional[Sequence[Sequence[int]]] = None,
     **decode_options,
 ) -> List[dict]:
     """Decode many independent chunks in batches, one decode pass per group.
@@ -418,9 +446,17 @@ def transcribe_chunks_batched(
 
     `progress_callback`, if given, is invoked once per decoded batch with a dict of timing
     and counts so callers can render a live progress log.
+
+    `context_tokens`, if given, holds one list of previously decoded tokens per chunk. Each
+    chunk is then prompted with `initial_prompt` followed by its own context, so chunks in
+    one batch can carry different histories.
     """
     if not audio_list:
         return []
+    if context_tokens is not None and len(context_tokens) != len(audio_list):
+        raise ValueError(
+            f"got {len(context_tokens)} context token lists for {len(audio_list)} chunks"
+        )
 
     dtype = mx.float16 if decode_options.get("fp16", True) else mx.float32
     model = ModelHolder.get_model(
@@ -444,7 +480,12 @@ def transcribe_chunks_batched(
     )
 
     decode_kwargs = {**decode_options, "language": language}
-    if initial_prompt is not None:
+    prompts = None
+    if context_tokens is not None:
+        prompts = _compose_chunk_prompts(
+            tokenizer, initial_prompt, context_tokens, model.dims.n_text_ctx
+        )
+    elif initial_prompt is not None:
         decode_kwargs["prompt"] = initial_prompt
 
     mels: List[mx.array] = []
@@ -473,6 +514,11 @@ def transcribe_chunks_batched(
             logprob_threshold=logprob_threshold,
             no_speech_threshold=no_speech_threshold,
             decode_options=decode_kwargs,
+            prompts=(
+                prompts[batch_start : batch_start + len(batch_mels)]
+                if prompts is not None
+                else None
+            ),
         )
         # MLX is lazy; force evaluation so the reported decode time is real GPU work and
         # not deferred into the word-timestamp or text-decoding step below.
@@ -494,6 +540,7 @@ def transcribe_chunks_batched(
                 "avg_logprob": result.avg_logprob,
                 "compression_ratio": result.compression_ratio,
                 "no_speech_prob": result.no_speech_prob,
+                "temperature": result.temperature,
                 "language": language,
             }
 

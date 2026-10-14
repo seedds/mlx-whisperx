@@ -26,6 +26,7 @@ Default behavior:
 - ASR model: `mlx-community/whisper-turbo`
 - VAD backend: Silero (`--vad_method silero`)
 - Chunking: VAD chunks decoded in batches of 8 (`--batch_size 8`)
+- Cross-chunk context: off; `--interleaved_context` prompts each chunk with the text before it
 - Decoding: greedy decoding with `beam_size=1` and `temperature=0`
 - Alignment: enabled for transcription
 - Diarization: disabled unless `--diarize` is passed
@@ -201,7 +202,7 @@ mlx-whisperx audio.wav \
   --suppress_numerals \
   --initial_prompt "Technical meeting about MLX WhisperX." \
   --hotwords "MLX, WhisperX, pyannote, diarization" \
-  --condition_on_previous_text True \
+  --interleaved_context \
   --compression_ratio_threshold 2.4 \
   --logprob_threshold -1.0 \
   --no_speech_threshold 0.6 \
@@ -327,7 +328,8 @@ Decoding options:
 - `--suppress_numerals`: suppress numeric and currency-symbol tokens.
 - `--initial_prompt`: initial prompt for ASR.
 - `--hotwords`: hint phrases appended to the prompt.
-- `--condition_on_previous_text`: prompt backend windows with previous text inside each VAD chunk.
+- `--interleaved_context`: prompt each VAD chunk with the text decoded before it, which helps punctuation and the spelling of recurring names, while still decoding in batches. See [Interleaved context](#interleaved-context).
+- `--condition_on_previous_text`: prompt each window with the previous window's text. Only applies with `--no_vad`; with VAD every chunk is a single window, so it has no effect and logs a warning pointing to `--interleaved_context`.
 
 Precision and model-cache options:
 
@@ -354,7 +356,7 @@ VAD options:
 
 Batching options:
 
-- `--batch_size`: number of chunks decoded together in one pass. Defaults to `8`. Higher values are faster but use more memory; `1` disables batching. Batching is skipped automatically when `--condition_on_previous_text` is set.
+- `--batch_size`: number of chunks decoded together in one pass. Defaults to `8`. Higher values are faster but use more memory; `1` disables batching. With `--interleaved_context` it is also the number of context streams.
 
 When using the default `--vad_method silero`, or when the `--vad_method auto` path falls back to Silero, Silero loads from the pinned `silero-vad` package, which ships its weights and needs no network access. To use a local Silero checkout instead, set:
 
@@ -391,6 +393,16 @@ Subtitle options:
 
 These limits apply whether or not forced alignment ran. With `--diarize`, a cue also ends
 at each speaker change, so one cue never mixes speakers under a single `[SPEAKER_XX]:` prefix.
+
+### Interleaved context
+
+Batched chunks are normally decoded independently, so a chunk cannot see the text before it. `--interleaved_context` (ported from WhisperX's context-aware batching) splits the chunks into `--batch_size` contiguous streams and decodes chunk *k* of every stream together. Each chunk is prompted with what its own stream has decoded so far, after `--initial_prompt` and `--hotwords`, up to Whisper's 223-token prompt limit. The first chunk of each stream after the first has no history in that pass, so it is decoded once more at the end, prompted with the tail of the stream before it.
+
+- Fewer streams give longer histories but less parallelism; `--batch_size 1` is a single stream in which every chunk is prompted with the chunks before it.
+- Chunks in one batch carry different prompt lengths. The decoder masks the padding, so each chunk decodes exactly as it would alone with the same prompt.
+- A stream's history is cleared after a chunk needed a decode above temperature 0.5 or looped on one word, so a hallucination is not fed forward. A chunk dropped as silence leaves the history unchanged.
+- The re-decode only replaces a chunk's text when both decodes pass the silence and loop checks, so it never turns a chunk the first pass judged silent into speech.
+- Cost: longer prompts on every chunk plus one extra batch of up to `--batch_size - 1` re-decodes.
 
 ## Examples
 
@@ -490,14 +502,14 @@ Import `.aud` into Audacity with **File -> Import -> Labels**.
 ## Current Behavior and Limitations
 
 - ASR decodes merged VAD chunks in batches of `--batch_size` (default 8); set `--batch_size 1` to decode serially.
-- Batching is disabled automatically when `--condition_on_previous_text` is set, because chunks then depend on each other.
+- Without `--interleaved_context`, VAD chunks are decoded independently and do not see each other's text.
 - `translate` skips forced alignment because alignment models are transcription-language specific.
 - Missing `torch`, `torchaudio`, or `transformers` still fail alignment by default; pass `--allow_missing_alignment_deps` to continue with ASR-only output instead.
 - `clip_timestamps` is only supported with `--no_vad` because VAD chunking changes the timing base before ASR runs. Clip ranges are decoded independently, so audio between them is skipped.
 - VAD chunks are capped at `--chunk_size` seconds, which must not exceed the 30-second decoder window; longer chunks are rejected rather than silently truncated.
 - Chunk text is dropped when the decoder scores it as non-speech above `--no_speech_threshold` and its average log probability is below `--logprob_threshold` (Whisper's silence rule), or when a single word makes up most of a long chunk. The latter is a decoder loop, which music and noise provoke — an opening theme can otherwise yield one word repeated hundreds of times as a single long cue. Emphatic real repetition is preserved; the loop test requires a majority of a long utterance to be one token. Drops are logged with their timestamp and reason.
 - The CLI exits nonzero when any input file fails, while still processing the remaining files.
-- `--condition_on_previous_text` prompts windows within a single VAD chunk. It does not carry context across VAD chunks, and it disables batching.
+- `--condition_on_previous_text` only affects `--no_vad` decoding. Use `--interleaved_context` to carry text across VAD chunks.
 - Pyannote VAD and diarization depend on a compatible PyTorch, torchaudio, pyannote installation, and Hugging Face model access when the selected model is gated. Without that stack, use the default `--vad_method silero` path or let `--vad_method auto` fall back to Silero VAD.
 - The vendored ASR backend lives under `mlx_whisperx.backend.mlx_whisper` so decoder behavior can be changed without modifying external reference repositories.
 

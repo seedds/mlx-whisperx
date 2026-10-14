@@ -64,12 +64,16 @@ class DiarizationPipeline:
             "waveform": self._torch.from_numpy(audio_np[None, :]),
             "sample_rate": SAMPLE_RATE,
         }
+        hook = _progress_hook(progress_callback) if progress_callback is not None else None
         output = self.model(
             audio_data,
             num_speakers=num_speakers,
             min_speakers=min_speakers,
             max_speakers=max_speakers,
+            **({"hook": hook} if hook is not None else {}),
         )
+        if progress_callback is not None:
+            progress_callback(100.0)
         diarization = output.speaker_diarization
         diarize_df = pd.DataFrame(
             diarization.itertracks(yield_label=True),
@@ -90,6 +94,31 @@ class DiarizationPipeline:
             }
             return diarize_df, speaker_embeddings
         return diarize_df
+
+
+# Pyannote reports progress for these steps, each counting from zero again. Mapping each
+# into its own range keeps the overall percentage monotonic.
+_PROGRESS_STEP_RANGES = {
+    "segmentation": (0.0, 50.0),
+    "embeddings": (50.0, 99.0),
+}
+
+
+def _progress_hook(progress_callback):
+    """Translate pyannote's per-step hook calls into a single 0-100 percentage."""
+    last_percent = 0.0
+
+    def hook(step_name, step_artifact, file=None, total=None, completed=None):
+        nonlocal last_percent
+        if total is None or completed is None or total <= 0:
+            return
+        low, high = _PROGRESS_STEP_RANGES.get(step_name, (0.0, 99.0))
+        percent = low + min(completed / total, 1.0) * (high - low)
+        if percent > last_percent:
+            last_percent = percent
+            progress_callback(percent)
+
+    return hook
 
 
 class IntervalTree:

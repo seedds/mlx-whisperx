@@ -157,6 +157,24 @@ class CLITests(unittest.TestCase):
         self.assertTrue(calls[0]["allow_missing_alignment_deps"])
         writer.assert_called_once()
 
+    def test_main_forwards_interleaved_context(self):
+        calls: list[dict] = []
+
+        def fake_transcribe(audio_path, **kwargs):
+            calls.append(kwargs)
+            return {"segments": [], "word_segments": [], "language": "en"}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            argv = ["mlx-whisperx", "audio.wav", "--interleaved_context", "--output_dir", tmpdir]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch("mlx_whisperx.cli.transcribe", side_effect=fake_transcribe),
+                mock.patch("mlx_whisperx.cli.get_writer", return_value=mock.Mock()),
+            ):
+                cli.main()
+
+        self.assertTrue(calls[0]["interleaved_context"])
+
     def test_main_exits_nonzero_when_every_file_fails(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             argv = ["mlx-whisperx", "a.wav", "b.wav", "--output_dir", tmpdir, "--output_format", "json"]

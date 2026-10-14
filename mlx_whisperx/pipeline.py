@@ -47,6 +47,12 @@ MAX_CHUNK_SIZE = 30
 # speech detection rather than with the content.
 LOW_COVERAGE_WARNING = 0.5
 
+# Whisper keeps at most n_text_ctx // 2 - 1 prompt tokens. The backend makes the exact
+# cut once the initial prompt is known; this only bounds the history each stream stores.
+CONTEXT_TOKEN_LIMIT = 223
+# Whisper stops carrying text forward after a window needed a hot retry to decode.
+CONTEXT_RESET_TEMPERATURE = 0.5
+
 
 @lru_cache(maxsize=32)
 def _find_numeral_symbol_tokens(
@@ -87,6 +93,54 @@ def _merge_suppress_tokens(suppress_tokens: str | Sequence[int] | None, extra_to
     return sorted(set(parsed_tokens).union(extra_tokens))
 
 
+def _split_streams(n_chunks: int, n_streams: int) -> list[list[int]]:
+    """Split chunk indices into contiguous streams; earlier streams take any remainder."""
+    size, extra = divmod(n_chunks, n_streams)
+    streams: list[list[int]] = []
+    start = 0
+    for stream in range(n_streams):
+        length = size + (1 if stream < extra else 0)
+        streams.append(list(range(start, start + length)))
+        start += length
+    return streams
+
+
+def _interleave_streams(streams: list[list[int]]) -> list[list[tuple[int, int]]]:
+    """Return batches holding the k-th chunk of every stream as `(stream, chunk)` pairs."""
+    depth = max((len(stream) for stream in streams), default=0)
+    return [
+        [(index, stream[step]) for index, stream in enumerate(streams) if step < len(stream)]
+        for step in range(depth)
+    ]
+
+
+def _extend_context(context: Sequence[int], tokens: Sequence[int], limit: int) -> list[int]:
+    """Append decoded tokens to a stream's history, keeping only the newest `limit`."""
+    if limit <= 0:
+        # `[-0:]` would keep everything.
+        return []
+    return [*context, *tokens][-limit:]
+
+
+def _rebase_progress(callback, *, batch_index: int, total_batches: int, windows_before: int, total_windows: int):
+    """Report a single-batch backend call as one batch of the whole decode pass."""
+    if callback is None:
+        return None
+
+    def _callback(info: dict) -> None:
+        callback(
+            {
+                **info,
+                "batch_index": batch_index,
+                "total_batches": total_batches,
+                "windows_done": windows_before + info["windows_done"],
+                "total_windows": total_windows,
+            }
+        )
+
+    return _callback
+
+
 @dataclass
 class PipelineOptions:
     """Configuration for every stage of `MLXWhisperXPipeline`.
@@ -110,6 +164,7 @@ class PipelineOptions:
     initial_prompt: Optional[str] = None
     hotwords: Optional[str] = None
     condition_on_previous_text: bool = False
+    interleaved_context: bool = False
     fp16: bool = True
     compression_ratio_threshold: Optional[float] = 2.4
     logprob_threshold: Optional[float] = -1.0
@@ -474,6 +529,11 @@ class MLXWhisperXPipeline:
         asr_kwargs = self._build_asr_kwargs(without_timestamps=not self.options.no_vad)
 
         if self.options.no_vad:
+            if self.options.interleaved_context:
+                logger.warning(
+                    "interleaved_context has no effect with no_vad; "
+                    "use condition_on_previous_text to carry text between windows"
+                )
             return self._asr_without_vad(audio, vad_chunks, asr_kwargs)
         return self._asr_with_vad(audio, vad_chunks, asr_kwargs)
 
@@ -538,9 +598,17 @@ class MLXWhisperXPipeline:
 
         chunk_kwargs = {**asr_kwargs, "language": language}
 
-        # Batching decodes multiple independent VAD chunks in one pass. It is only valid
-        # when chunks do not depend on each other, so cross-chunk prompting disables it.
-        if self.options.batch_size > 1 and not self.options.condition_on_previous_text:
+        if self.options.condition_on_previous_text:
+            # Each VAD chunk is decoded as one window, so there is no earlier window
+            # inside it to condition on; turning batching off for it would only be slower.
+            logger.warning(
+                "condition_on_previous_text has no effect with VAD; "
+                "use interleaved_context to carry text across VAD chunks"
+            )
+        if self.options.interleaved_context:
+            return self._asr_with_vad_interleaved(audio, vad_chunks, chunk_kwargs, language)
+        # Batching decodes multiple independent VAD chunks in one pass.
+        if self.options.batch_size > 1:
             return self._asr_with_vad_batched(audio, vad_chunks, chunk_kwargs, language)
 
         total = len(vad_chunks)
@@ -596,22 +664,7 @@ class MLXWhisperXPipeline:
     ) -> dict:
         """Decode VAD chunks in batches and restore chunk-local timestamps to file time."""
         all_segments: list[dict] = []
-
-        prepared: list[dict] = []
-        audio_list: list[np.ndarray] = []
-        for chunk in vad_chunks:
-            start = float(chunk["start"])
-            end = float(chunk["end"])
-            chunk_audio = self._speech_only_chunk_audio(audio, chunk)
-            if chunk_audio.size == 0:
-                continue
-            speech_segments = [
-                (float(seg_start) - start, float(seg_end) - start)
-                for seg_start, seg_end in chunk.get("segments", [])
-            ]
-            prepared.append({"start": start, "end": end, "speech_segments": speech_segments})
-            audio_list.append(chunk_audio)
-
+        prepared, audio_list = self._prepare_vad_chunks(audio, vad_chunks)
         if not audio_list:
             return {"segments": all_segments, "language": language or "en"}
 
@@ -626,7 +679,126 @@ class MLXWhisperXPipeline:
             progress_callback=self._make_batch_progress_callback("VAD ASR"),
             **batched_kwargs,
         )
+        self._emit_vad_results(all_segments, prepared, chunk_results)
+        return {"segments": all_segments, "language": language or "en"}
 
+    def _asr_with_vad_interleaved(
+        self,
+        audio: np.ndarray,
+        vad_chunks: list[dict],
+        chunk_kwargs: dict,
+        language: Optional[str],
+    ) -> dict:
+        """Decode VAD chunks in batches while each chunk is prompted with the text before it.
+
+        Chunks are split into `batch_size` contiguous streams and batch k holds chunk k of
+        every stream, so each chunk can be prompted with what its own stream decoded so far
+        while the batch still decodes in one pass. The first chunk of each later stream has
+        no history in that pass; it is decoded again at the end, prompted with the tail of
+        the stream before it, which is the audio immediately preceding it.
+        """
+        all_segments: list[dict] = []
+        prepared, audio_list = self._prepare_vad_chunks(audio, vad_chunks)
+        if not audio_list:
+            return {"segments": all_segments, "language": language or "en"}
+
+        n_chunks = len(audio_list)
+        n_streams = min(self.options.batch_size, n_chunks)
+        if n_streams > 1 and n_chunks < 2 * n_streams:
+            logger.warning(
+                "Interleaved context: %d chunks over %d streams gives some streams a single "
+                "chunk, so little text carries over; a smaller batch_size gives longer histories",
+                n_chunks,
+                n_streams,
+            )
+        streams = _split_streams(n_chunks, n_streams)
+        batches = _interleave_streams(streams)
+        logger.info("VAD ASR: %d chunks, %d interleaved streams", n_chunks, n_streams)
+
+        batched_kwargs = {key: value for key, value in chunk_kwargs.items() if key != "verbose"}
+        progress = self._make_batch_progress_callback("VAD ASR")
+        contexts: list[list[int]] = [[] for _ in streams]
+        chunk_results: list[Optional[dict]] = [None] * n_chunks
+        windows_done = 0
+        for batch_index, batch in enumerate(batches):
+            batch_results = self._mlx_whisper.transcribe_chunks_batched(
+                [audio_list[chunk] for _, chunk in batch],
+                batch_size=len(batch),
+                context_tokens=[contexts[stream] for stream, _ in batch],
+                progress_callback=_rebase_progress(
+                    progress,
+                    batch_index=batch_index,
+                    total_batches=len(batches),
+                    windows_before=windows_done,
+                    total_windows=n_chunks,
+                ),
+                **batched_kwargs,
+            )
+            windows_done += len(batch)
+            for (stream, chunk), chunk_result in zip(batch, batch_results):
+                chunk_results[chunk] = chunk_result
+                contexts[stream] = self._next_stream_context(contexts[stream], chunk_result)
+
+        # Stream 0 starts the file, so its first chunk has no earlier text to gain.
+        redo = [
+            (streams[stream][0], contexts[stream - 1])
+            for stream in range(1, n_streams)
+            if contexts[stream - 1]
+        ]
+        if redo:
+            redo_results = self._mlx_whisper.transcribe_chunks_batched(
+                [audio_list[chunk] for chunk, _ in redo],
+                batch_size=len(redo),
+                context_tokens=[context for _, context in redo],
+                progress_callback=self._make_batch_progress_callback("VAD ASR wrap-around"),
+                **batched_kwargs,
+            )
+            for (chunk, _), chunk_result in zip(redo, redo_results):
+                start = prepared[chunk]["start"]
+                # The redo only refines text. Prompting can lower no_speech_prob, so a
+                # chunk the first pass judged silent must stay that way.
+                if self._keep_chunk_text(chunk_results[chunk], start, quiet=True) and self._keep_chunk_text(
+                    chunk_result, start, quiet=True
+                ):
+                    chunk_results[chunk] = chunk_result
+
+        self._emit_vad_results(all_segments, prepared, chunk_results)
+        return {"segments": all_segments, "language": language or "en"}
+
+    def _next_stream_context(self, context: list[int], chunk_result: dict) -> list[int]:
+        """Update one stream's history after a chunk decodes, following Whisper's rules.
+
+        Text from a hot-temperature retry or a repetition loop is not trusted as history,
+        so the stream starts over. A chunk judged silent adds nothing but keeps what came
+        before, as Whisper's own seek loop does for silent windows.
+        """
+        temperature = chunk_result.get("temperature") or 0.0
+        if temperature > CONTEXT_RESET_TEMPERATURE or is_repetition_loop(chunk_result.get("text", "")):
+            return []
+        if not self._keep_chunk_text(chunk_result, 0.0, quiet=True):
+            return context
+        return _extend_context(context, chunk_result.get("tokens", []), CONTEXT_TOKEN_LIMIT)
+
+    def _prepare_vad_chunks(self, audio: np.ndarray, vad_chunks: list[dict]) -> tuple[list[dict], list[np.ndarray]]:
+        """Compact each VAD chunk to its speech and keep what is needed to map times back."""
+        prepared: list[dict] = []
+        audio_list: list[np.ndarray] = []
+        for chunk in vad_chunks:
+            start = float(chunk["start"])
+            end = float(chunk["end"])
+            chunk_audio = self._speech_only_chunk_audio(audio, chunk)
+            if chunk_audio.size == 0:
+                continue
+            speech_segments = [
+                (float(seg_start) - start, float(seg_end) - start)
+                for seg_start, seg_end in chunk.get("segments", [])
+            ]
+            prepared.append({"start": start, "end": end, "speech_segments": speech_segments})
+            audio_list.append(chunk_audio)
+        return prepared, audio_list
+
+    def _emit_vad_results(self, all_segments: list[dict], prepared: list[dict], chunk_results: list[dict]) -> None:
+        """Append decoded chunks as file-time segments, skipping text that is rejected."""
         total = len(chunk_results)
         for idx, (meta, chunk_result) in enumerate(zip(prepared, chunk_results)):
             chunk_segments = []
@@ -642,8 +814,6 @@ class MLXWhisperXPipeline:
 
             if self.options.print_progress:
                 print(f"Progress: {((idx + 1) / total) * 50:.2f}%...")
-
-        return {"segments": all_segments, "language": language or "en"}
 
     def _make_batch_progress_callback(self, stage: str):
         """Build a callback that logs per-batch decode timing and throughput."""
@@ -667,7 +837,7 @@ class MLXWhisperXPipeline:
 
         return _callback
 
-    def _keep_chunk_text(self, chunk_result: dict, start: float) -> bool:
+    def _keep_chunk_text(self, chunk_result: dict, start: float, *, quiet: bool = False) -> bool:
         """Decide whether a decoded chunk's text should be emitted at all.
 
         The decoder's own quality signals gate only the temperature retry, never
@@ -700,6 +870,9 @@ class MLXWhisperXPipeline:
 
         if reason is None:
             return True
+        if quiet:
+            # Bookkeeping checks run before the final emit, which logs the drop once.
+            return False
 
         logger.warning(
             "Dropping chunk at %02d:%05.2f (%s): %.60s",

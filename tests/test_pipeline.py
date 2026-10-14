@@ -330,27 +330,28 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("verbose", kwargs)
         fake_backend.transcribe_chunk.assert_not_called()
 
-    def test_condition_on_previous_text_disables_vad_batching(self):
+    def test_condition_on_previous_text_warns_and_keeps_vad_batching(self):
         fake_backend = mock.Mock()
         fake_backend.detect_language.return_value = "en"
-        fake_backend.transcribe_chunk.return_value = {
-            "start": 0.0,
-            "end": 1.0,
-            "text": "hello",
-            "avg_logprob": -0.1,
-        }
+        fake_backend.transcribe_chunks_batched.return_value = [
+            {"start": 0.0, "end": 1.0, "text": "hello", "avg_logprob": -0.1},
+        ]
         with mock.patch("mlx_whisperx.pipeline.import_mlx_whisper", return_value=fake_backend):
             pipeline = MLXWhisperXPipeline(
                 PipelineOptions(batch_size=8, condition_on_previous_text=True)
             )
 
-        pipeline._asr(
-            np.zeros(16000 * 3, dtype=np.float32),
-            [{"start": 1.0, "end": 2.0, "segments": [(1.0, 2.0)]}],
-        )
+        with self.assertLogs("mlx_whisperx.pipeline", level="WARNING") as logs:
+            pipeline._asr(
+                np.zeros(16000 * 3, dtype=np.float32),
+                [{"start": 1.0, "end": 2.0, "segments": [(1.0, 2.0)]}],
+            )
 
-        fake_backend.transcribe_chunk.assert_called_once()
-        fake_backend.transcribe_chunks_batched.assert_not_called()
+        # Each VAD chunk is one decoder window, so there is nothing to condition on and
+        # no reason to give up batching.
+        fake_backend.transcribe_chunks_batched.assert_called_once()
+        fake_backend.transcribe_chunk.assert_not_called()
+        self.assertTrue(any("interleaved_context" in line for line in logs.output))
 
     def test_vad_batching_compacts_chunks_without_internal_silence(self):
         fake_backend = mock.Mock()

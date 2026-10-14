@@ -111,6 +111,8 @@ class DecodingOptions:
     # text or tokens to feed as the prompt or the prefix; for more info:
     # https://github.com/openai/whisper/discussions/117#discussioncomment-3727051
     prompt: Optional[Union[str, List[int]]] = None  # for the previous context
+    # per-window previous context, one token list per audio item; replaces `prompt`
+    prompts: Optional[Sequence[List[int]]] = None
     prefix: Optional[Union[str, List[int]]] = None  # to prefix the current context
 
     # list of tokens ids (or comma-separated token ids) to suppress
@@ -147,11 +149,13 @@ class Inference:
     def __init__(self, model: "Whisper"):
         self.model: "Whisper" = model
         self.kv_cache = None
+        # Left-padding per row when windows carry prompts of different lengths.
+        self.pad_lengths: Optional[mx.array] = None
 
     def logits(self, tokens: mx.array, audio_features: mx.array) -> mx.array:
         """Perform a forward pass on the decoder and return per-token logits"""
         logits, self.kv_cache, _ = self.model.decoder(
-            tokens, audio_features, kv_cache=self.kv_cache
+            tokens, audio_features, kv_cache=self.kv_cache, pad_lengths=self.pad_lengths
         )
         return logits.astype(mx.float32)
 
@@ -160,9 +164,14 @@ class Inference:
         # update the key/value cache to contain the selected sequences
         if source_indices != list(range(len(source_indices))):
             self.kv_cache = tree_map(lambda x: x[source_indices], self.kv_cache)
+            if self.pad_lengths is not None:
+                # Beams only swap within one audio item, so this keeps each row's
+                # padding unchanged; it is rearranged anyway to keep the pairing explicit.
+                self.pad_lengths = self.pad_lengths[mx.array(source_indices)]
 
     def reset(self):
         self.kv_cache = None
+        self.pad_lengths = None
 
 
 class SequenceRanker:
@@ -639,9 +648,19 @@ class DecodingTask:
         if self.options.without_timestamps:
             self.sot_sequence = tokenizer.sot_sequence_including_notimestamps
 
-        self.initial_tokens: Tuple[int] = self._get_initial_tokens()
-        self.sample_begin: int = len(self.initial_tokens)
-        self.sot_index: int = self.initial_tokens.index(tokenizer.sot)
+        prompts = (
+            self.options.prompts if self.options.prompts is not None else [self.options.prompt]
+        )
+        rows = [self._get_initial_tokens(prompt) for prompt in prompts]
+        width = max(len(row) for row in rows)
+        # Left-pad so every row's sot_sequence ends at the same index; the decoder masks
+        # the padding, so the pad value (eot) is never attended.
+        self.pad_lengths: List[int] = [width - len(row) for row in rows]
+        self.initial_tokens: List[Tuple[int]] = [
+            (tokenizer.eot,) * pad + row for pad, row in zip(self.pad_lengths, rows)
+        ]
+        self.sample_begin: int = width
+        self.sot_index: int = self.pad_lengths[0] + rows[0].index(tokenizer.sot)
 
         # inference: implements the forward pass through the decoder, including kv caching
         self.inference = Inference(model)
@@ -697,10 +716,14 @@ class DecodingTask:
             0 <= options.length_penalty <= 1
         ):
             raise ValueError("length_penalty (alpha) should be a value between 0 and 1")
+        if options.prompt is not None and options.prompts is not None:
+            raise ValueError("prompt and prompts can't be given together")
+        if options.prompts is not None and len(options.prompts) == 0:
+            raise ValueError("prompts must contain one entry per audio window")
 
         return options
 
-    def _get_initial_tokens(self) -> Tuple[int]:
+    def _get_initial_tokens(self, prompt) -> Tuple[int]:
         """Build the prompt prefix fed before generated tokens."""
         tokens = list(self.sot_sequence)
 
@@ -716,7 +739,7 @@ class DecodingTask:
                 prefix_tokens = prefix_tokens[-max_prefix_len:]
             tokens = tokens + prefix_tokens
 
-        if prompt := self.options.prompt:
+        if prompt:
             prompt_tokens = (
                 self.tokenizer.encode(" " + prompt.strip())
                 if isinstance(prompt, str)
@@ -860,9 +883,19 @@ class DecodingTask:
         tokenizer: Tokenizer = self.tokenizer
         n_audio: int = mel.shape[0]
 
+        if self.options.prompts is not None and len(self.options.prompts) != n_audio:
+            raise ValueError(
+                f"got {len(self.options.prompts)} prompts for {n_audio} audio windows"
+            )
+
         audio_features: mx.array = self._get_audio_features(mel)  # encoder forward pass
-        tokens: mx.array = mx.array(self.initial_tokens)
-        tokens = mx.broadcast_to(tokens, (n_audio, len(self.initial_tokens)))
+        if len(self.initial_tokens) == 1:
+            tokens: mx.array = mx.array(self.initial_tokens[0])
+            tokens = mx.broadcast_to(tokens, (n_audio, self.sample_begin))
+        else:
+            tokens = mx.array(self.initial_tokens)
+        # Equal-length prompts need no mask, so they keep the unpadded decoder path.
+        pad_lengths = mx.array(self.pad_lengths) if any(self.pad_lengths) else None
 
         # detect language if requested, overwriting the language token
         languages, language_probs = self._detect_language(audio_features, tokens)
@@ -885,11 +918,14 @@ class DecodingTask:
             # matching the (n_audio, n_group) -> (n_audio * n_group) token layout below.
             tokens = tokens[:, None, :]
             tokens = mx.broadcast_to(
-                tokens, [n_audio, self.n_group, len(self.initial_tokens)]
+                tokens, [n_audio, self.n_group, self.sample_begin]
             )
-            tokens = tokens.reshape((n_audio * self.n_group, len(self.initial_tokens)))
+            tokens = tokens.reshape((n_audio * self.n_group, self.sample_begin))
             audio_features = mx.repeat(audio_features, self.n_group, axis=0)
+            if pad_lengths is not None:
+                pad_lengths = mx.repeat(pad_lengths, self.n_group, axis=0)
 
+        self.inference.pad_lengths = pad_lengths
         # call the main sampling loop
         tokens, sum_logprobs, no_speech_probs = self._main_loop(audio_features, tokens)
 

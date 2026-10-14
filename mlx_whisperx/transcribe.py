@@ -22,6 +22,7 @@ def transcribe(
     initial_prompt: Optional[str] = None,
     hotwords: Optional[str] = None,
     condition_on_previous_text: bool = False,
+    interleaved_context: bool = False,
     fp16: bool = True,
     compression_ratio_threshold: Optional[float] = 2.4,
     logprob_threshold: Optional[float] = -1.0,

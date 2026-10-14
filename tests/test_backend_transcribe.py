@@ -57,6 +57,14 @@ class BackendTranscribeTests(unittest.TestCase):
                 if parent is not None and attr in parent.__dict__:
                     delattr(parent, attr)
 
+    @staticmethod
+    def _fresh_module(name):
+        # Patching attributes onto an already-imported real module would leak the fakes
+        # into later test modules, because tearDown restores module entries, not attributes.
+        module = types.ModuleType(name)
+        sys.modules[name] = module
+        return module
+
     def _import_transcribe(self):
         # Install fresh stubs rather than reusing whatever is already imported: another
         # test module may have imported the real mlx, whose `stack` rejects these fakes.
@@ -73,10 +81,7 @@ class BackendTranscribeTests(unittest.TestCase):
         sys.modules["mlx.core"] = mx_core
         sys.modules.setdefault("tqdm", types.ModuleType("tqdm"))
 
-        audio = sys.modules.setdefault(
-            "mlx_whisperx.backend.mlx_whisper.audio",
-            types.ModuleType("mlx_whisperx.backend.mlx_whisper.audio"),
-        )
+        audio = self._fresh_module("mlx_whisperx.backend.mlx_whisper.audio")
         audio.CHUNK_LENGTH = 30
         audio.FRAMES_PER_SECOND = 50
         audio.HOP_LENGTH = 320
@@ -87,47 +92,33 @@ class BackendTranscribeTests(unittest.TestCase):
         audio.log_mel_spectrogram = mock.Mock()
         audio.pad_or_trim = mock.Mock()
 
-        decoding = sys.modules.setdefault(
-            "mlx_whisperx.backend.mlx_whisper.decoding",
-            types.ModuleType("mlx_whisperx.backend.mlx_whisper.decoding"),
-        )
+        decoding = self._fresh_module("mlx_whisperx.backend.mlx_whisper.decoding")
 
         class FakeDecodingOptions:
             def __init__(self, **kwargs):
                 self.__dict__.update(kwargs)
 
         class FakeDecodingResult:
-            def __init__(self, compression_ratio=0.0, avg_logprob=0.0, no_speech_prob=0.0):
+            def __init__(self, compression_ratio=0.0, avg_logprob=0.0, no_speech_prob=0.0, temperature=0.0):
                 self.compression_ratio = compression_ratio
                 self.avg_logprob = avg_logprob
                 self.no_speech_prob = no_speech_prob
+                self.temperature = temperature
 
         decoding.DecodingOptions = FakeDecodingOptions
         decoding.DecodingResult = FakeDecodingResult
 
-        languages = sys.modules.setdefault(
-            "mlx_whisperx.backend.mlx_whisper.languages",
-            types.ModuleType("mlx_whisperx.backend.mlx_whisper.languages"),
-        )
+        languages = self._fresh_module("mlx_whisperx.backend.mlx_whisper.languages")
         languages.LANGUAGES = {"en": "English"}
         languages.TO_LANGUAGE_CODE = {"english": "en"}
 
-        load_models = sys.modules.setdefault(
-            "mlx_whisperx.backend.mlx_whisper.load_models",
-            types.ModuleType("mlx_whisperx.backend.mlx_whisper.load_models"),
-        )
+        load_models = self._fresh_module("mlx_whisperx.backend.mlx_whisper.load_models")
         load_models.load_model = mock.Mock()
 
-        timing = sys.modules.setdefault(
-            "mlx_whisperx.backend.mlx_whisper.timing",
-            types.ModuleType("mlx_whisperx.backend.mlx_whisper.timing"),
-        )
+        timing = self._fresh_module("mlx_whisperx.backend.mlx_whisper.timing")
         timing.add_word_timestamps = mock.Mock()
 
-        tokenizer = sys.modules.setdefault(
-            "mlx_whisperx.backend.mlx_whisper.tokenizer",
-            types.ModuleType("mlx_whisperx.backend.mlx_whisper.tokenizer"),
-        )
+        tokenizer = self._fresh_module("mlx_whisperx.backend.mlx_whisper.tokenizer")
         tokenizer.get_tokenizer = mock.Mock()
 
         sys.modules.pop("mlx_whisperx.backend.mlx_whisper.transcribe", None)
@@ -199,6 +190,70 @@ class BackendTranscribeTests(unittest.TestCase):
         self.assertEqual(calls[0][1], 0.0)
         self.assertEqual(calls[1][1], 0.2)
         self.assertEqual(len(calls[1][0]), 1)
+
+    def test_batch_fallback_retries_keep_each_windows_own_prompt(self):
+        transcribe = self._import_transcribe()
+
+        prompts_seen = []
+
+        def fake_decode(mels, options):
+            prompts_seen.append(options.prompts)
+            if options.temperature == 0.0:
+                return [
+                    transcribe.DecodingResult(avg_logprob=0.0),
+                    transcribe.DecodingResult(avg_logprob=-5.0),
+                ]
+            return [transcribe.DecodingResult(avg_logprob=0.0)]
+
+        model = types.SimpleNamespace(decode=mock.Mock(side_effect=fake_decode))
+
+        transcribe._decode_batch_with_fallback(
+            model,
+            mx_array([10, 20]),
+            temperature=(0.0, 0.2),
+            compression_ratio_threshold=2.4,
+            logprob_threshold=-1.0,
+            no_speech_threshold=0.6,
+            decode_options={"language": "en"},
+            prompts=[[1, 2], [3]],
+        )
+
+        # Only the failing second window is retried, and it keeps its own prompt.
+        self.assertEqual(prompts_seen, [[[1, 2], [3]], [[3]]])
+
+    def test_chunk_prompts_keep_the_initial_prompt_and_trim_old_context(self):
+        transcribe = self._import_transcribe()
+        tokenizer = types.SimpleNamespace(eot=100, encode=lambda text: [90, 91])
+
+        prompts = transcribe._compose_chunk_prompts(
+            tokenizer,
+            "Names",
+            [[], [1, 2, 3, 4, 5], [6, 100, 7]],
+            n_text_ctx=12,
+        )
+
+        # Budget is 12 // 2 - 1 - 2 = 3: the oldest context goes first, tokens at or
+        # above eot are dropped, and the initial prompt always leads.
+        self.assertEqual(prompts, [[90, 91], [90, 91, 3, 4, 5], [90, 91, 6, 7]])
+
+    def test_chunk_prompts_drop_context_when_the_initial_prompt_fills_the_budget(self):
+        transcribe = self._import_transcribe()
+        tokenizer = types.SimpleNamespace(eot=100, encode=lambda text: [90, 91, 92, 93, 94])
+
+        prompts = transcribe._compose_chunk_prompts(tokenizer, "Long", [[1, 2]], n_text_ctx=12)
+
+        self.assertEqual(prompts, [[90, 91, 92, 93, 94]])
+
+    def test_chunk_prompts_without_initial_prompt_use_context_only(self):
+        transcribe = self._import_transcribe()
+        tokenizer = types.SimpleNamespace(eot=100, encode=mock.Mock())
+
+        for initial_prompt in (None, ""):
+            prompts = transcribe._compose_chunk_prompts(
+                tokenizer, initial_prompt, [[1, 2]], n_text_ctx=12
+            )
+            self.assertEqual(prompts, [[1, 2]])
+        tokenizer.encode.assert_not_called()
 
     def test_decode_with_fallback_reraises_other_runtime_errors(self):
         transcribe = self._import_transcribe()

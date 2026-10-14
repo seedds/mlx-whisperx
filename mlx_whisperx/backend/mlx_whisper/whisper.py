@@ -99,7 +99,8 @@ class MultiHeadAttention(nn.Module):
         qk = q @ k
         if mask is not None:
             # The causal mask prevents decoder self-attention from seeing future tokens.
-            qk = qk + mask[:n_ctx, :n_ctx]
+            # A 4-D mask is already shaped per row for padded batches.
+            qk = qk + (mask[:n_ctx, :n_ctx] if mask.ndim == 2 else mask)
 
         w = mx.softmax(qk, axis=-1, precise=True)
         out = (w @ v).transpose(0, 2, 1, 3)
@@ -202,19 +203,39 @@ class TextDecoder(nn.Module):
             dtype
         )
 
-    def __call__(self, x, xa, kv_cache=None):
+    def _padded_positions_and_mask(self, offset: int, length: int, pad_lengths: mx.array):
+        """Build per-row positions and an attention mask for left-padded rows."""
+        pad = pad_lengths[:, None, None]
+        query = (offset + mx.arange(length))[None, :, None]
+        key = mx.arange(offset + length)[None, None, :]
+        # Each row's first real token sits at position 0, exactly as when decoded alone.
+        positions = mx.maximum(query[..., 0] - pad[..., 0], 0)
+        # Causal, with padded keys hidden. A padded query still sees itself: an all
+        # -inf softmax row is NaN, and 0 * NaN in `w @ v` would reach the real rows.
+        allowed = (key <= query) & ((key >= pad) | (key == query))
+        mask = mx.where(allowed, 0.0, -mx.inf).astype(self._mask.dtype)
+        return self.positional_embedding[positions], mask[:, None]
+
+    def __call__(self, x, xa, kv_cache=None, pad_lengths=None):
         """
         x : mx.array, shape = (batch_size, <= n_ctx)
             the text tokens
         xa : mx.array, shape = (batch_size, n_audio_ctx, n_audio_state)
             the encoded audio features to be attended on
+        pad_lengths : mx.array, shape = (batch_size,), optional
+            number of left-padding tokens in each row; padded positions are masked so
+            every row decodes as if it had been decoded alone
         """
         offset = kv_cache[0][0][0].shape[1] if kv_cache else 0
-        # When decoding incrementally, positions begin after the cached sequence length.
-        x = (
-            self.token_embedding(x)
-            + self.positional_embedding[offset : offset + x.shape[-1]]
-        )
+        if pad_lengths is None:
+            # When decoding incrementally, positions begin after the cached sequence length.
+            positional = self.positional_embedding[offset : offset + x.shape[-1]]
+            mask = self._mask
+        else:
+            positional, mask = self._padded_positions_and_mask(
+                offset, x.shape[-1], pad_lengths
+            )
+        x = self.token_embedding(x) + positional
 
         if kv_cache is None:
             # Keep one self-attention and one cross-attention cache per decoder block.
@@ -222,7 +243,7 @@ class TextDecoder(nn.Module):
         cross_qk = [None] * len(self.blocks)
         for e, block in enumerate(self.blocks):
             x, kv_cache[e], cross_qk[e] = block(
-                x, xa, mask=self._mask, kv_cache=kv_cache[e]
+                x, xa, mask=mask, kv_cache=kv_cache[e]
             )
 
         x = self.ln(x)
