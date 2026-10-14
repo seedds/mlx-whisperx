@@ -243,7 +243,7 @@ class PipelineTests(unittest.TestCase):
         detection_audio = fake_backend.detect_language.call_args.args[0]
         np.testing.assert_array_equal(detection_audio, audio[16000 * 40 : 16000 * 41])
 
-    def test_asr_with_vad_compacts_inner_speech_segments_before_decoding(self):
+    def test_asr_with_vad_decodes_the_whole_chunk_span(self):
         fake_backend = mock.Mock()
         fake_backend.detect_language.return_value = "en"
         fake_backend.transcribe_chunk.return_value = {
@@ -267,11 +267,12 @@ class PipelineTests(unittest.TestCase):
             ],
         )
 
+        # The 2.0-3.0s gap between VAD turns is decoded too: speech the VAD missed
+        # there would otherwise never reach the decoder.
         chunk_audio = fake_backend.transcribe_chunk.call_args.args[0]
-        expected = np.concatenate([audio[16000:32000], audio[48000:72000]])
-        np.testing.assert_array_equal(chunk_audio, expected)
+        np.testing.assert_array_equal(chunk_audio, audio[16000:72000])
 
-    def test_asr_with_vad_restores_timestamps_across_internal_silence(self):
+    def test_asr_with_vad_offsets_backend_times_by_chunk_start(self):
         fake_backend = mock.Mock()
         fake_backend.detect_language.return_value = "en"
         fake_backend.transcribe_chunk.return_value = {
@@ -296,7 +297,7 @@ class PipelineTests(unittest.TestCase):
 
         self.assertEqual(
             result["segments"],
-            [{"start": 10.8, "end": 12.2, "text": "hello", "avg_logprob": -0.1}],
+            [{"start": 10.8, "end": 11.2, "text": "hello", "avg_logprob": -0.1}],
         )
 
     def test_asr_with_vad_batches_chunks_into_single_backend_call(self):
@@ -353,7 +354,7 @@ class PipelineTests(unittest.TestCase):
         fake_backend.transcribe_chunk.assert_not_called()
         self.assertTrue(any("interleaved_context" in line for line in logs.output))
 
-    def test_vad_batching_compacts_chunks_without_internal_silence(self):
+    def test_vad_batching_decodes_whole_chunk_spans(self):
         fake_backend = mock.Mock()
         fake_backend.transcribe_chunks_batched.return_value = [
             {"start": 0.0, "end": 2.0, "text": "hello", "avg_logprob": -0.1, "language": "en"},
@@ -373,16 +374,16 @@ class PipelineTests(unittest.TestCase):
 
         first_chunk = fake_backend.transcribe_chunks_batched.call_args.args[0][0]
         second_chunk = fake_backend.transcribe_chunks_batched.call_args.args[0][1]
-        np.testing.assert_array_equal(first_chunk, audio[19200:28800])
-        np.testing.assert_array_equal(second_chunk, audio[54400:67200])
+        np.testing.assert_array_equal(first_chunk, audio[16000:48000])
+        np.testing.assert_array_equal(second_chunk, audio[48000:80000])
         kwargs = fake_backend.transcribe_chunks_batched.call_args.kwargs
         self.assertEqual(kwargs["batch_size"], 8)
         self.assertTrue(kwargs["without_timestamps"])
         self.assertEqual(
             result["segments"],
             [
-                {"start": 1.2, "end": 1.8, "text": "hello", "avg_logprob": -0.1},
-                {"start": 3.4, "end": 4.2, "text": "world", "avg_logprob": -0.2},
+                {"start": 1.0, "end": 3.0, "text": "hello", "avg_logprob": -0.1},
+                {"start": 3.0, "end": 5.0, "text": "world", "avg_logprob": -0.2},
             ],
         )
 

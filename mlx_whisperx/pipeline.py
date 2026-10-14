@@ -615,20 +615,12 @@ class MLXWhisperXPipeline:
         for idx, chunk in enumerate(vad_chunks):
             start = float(chunk["start"])
             end = float(chunk["end"])
-            speech_segments = [
-                (float(seg_start) - start, float(seg_end) - start)
-                for seg_start, seg_end in chunk.get("segments", [])
-            ]
-            chunk_audio = self._speech_only_chunk_audio(audio, chunk)
+            chunk_audio = slice_audio(audio, start, end)
             if chunk_audio.size == 0:
                 continue
 
             chunk_result = self._mlx_whisper.transcribe_chunk(chunk_audio, **chunk_kwargs)
-            chunk_segments = []
-            if self._keep_chunk_text(chunk_result, start):
-                chunk_segments = [
-                    self._restore_vad_chunk_segment(chunk_result, speech_segments, end - start)
-                ]
+            chunk_segments = [chunk_result] if self._keep_chunk_text(chunk_result, start) else []
             self._append_asr_segments(all_segments, chunk_segments, start, end)
 
             if self.options.print_progress:
@@ -780,20 +772,21 @@ class MLXWhisperXPipeline:
         return _extend_context(context, chunk_result.get("tokens", []), CONTEXT_TOKEN_LIMIT)
 
     def _prepare_vad_chunks(self, audio: np.ndarray, vad_chunks: list[dict]) -> tuple[list[dict], list[np.ndarray]]:
-        """Compact each VAD chunk to its speech and keep what is needed to map times back."""
+        """Slice each VAD chunk's full span, as WhisperX does.
+
+        The audio between VAD turns stays in: a VAD miss inside a chunk would otherwise
+        be cut out before the decoder could hear it, and each VAD misses different
+        speech, so neither can be trusted to decide what is spoken.
+        """
         prepared: list[dict] = []
         audio_list: list[np.ndarray] = []
         for chunk in vad_chunks:
             start = float(chunk["start"])
             end = float(chunk["end"])
-            chunk_audio = self._speech_only_chunk_audio(audio, chunk)
+            chunk_audio = slice_audio(audio, start, end)
             if chunk_audio.size == 0:
                 continue
-            speech_segments = [
-                (float(seg_start) - start, float(seg_end) - start)
-                for seg_start, seg_end in chunk.get("segments", [])
-            ]
-            prepared.append({"start": start, "end": end, "speech_segments": speech_segments})
+            prepared.append({"start": start, "end": end})
             audio_list.append(chunk_audio)
         return prepared, audio_list
 
@@ -801,15 +794,7 @@ class MLXWhisperXPipeline:
         """Append decoded chunks as file-time segments, skipping text that is rejected."""
         total = len(chunk_results)
         for idx, (meta, chunk_result) in enumerate(zip(prepared, chunk_results)):
-            chunk_segments = []
-            if self._keep_chunk_text(chunk_result, meta["start"]):
-                chunk_segments = [
-                    self._restore_vad_chunk_segment(
-                        chunk_result,
-                        meta["speech_segments"],
-                        meta["end"] - meta["start"],
-                    )
-                ]
+            chunk_segments = [chunk_result] if self._keep_chunk_text(chunk_result, meta["start"]) else []
             self._append_asr_segments(all_segments, chunk_segments, meta["start"], meta["end"])
 
             if self.options.print_progress:
@@ -884,7 +869,11 @@ class MLXWhisperXPipeline:
         return False
 
     def _speech_only_chunk_audio(self, audio: np.ndarray, chunk: dict) -> np.ndarray:
-        """Concatenate only the voiced regions inside one VAD chunk."""
+        """Concatenate only the voiced regions inside one VAD chunk.
+
+        Used for language detection only, where an intro of music or silence must not
+        decide the language. Transcription decodes the full chunk span instead.
+        """
         speech_segments = chunk.get("segments", [])
         if not speech_segments:
             return slice_audio(audio, float(chunk["start"]), float(chunk["end"]))
@@ -897,58 +886,6 @@ class MLXWhisperXPipeline:
         if not pieces:
             return np.array([], dtype=np.float32)
         return np.concatenate(pieces)
-
-    def _restore_vad_chunk_segment(
-        self,
-        segment: dict,
-        speech_segments: list[tuple[float, float]],
-        chunk_duration: float,
-    ) -> dict:
-        """Map compacted speech-only timestamps back onto the original chunk timeline."""
-        if not speech_segments:
-            return segment
-
-        restored = dict(segment)
-        restored["start"] = round(
-            self._restore_speech_time(float(segment.get("start", 0.0)), speech_segments, is_end=False),
-            3,
-        )
-        restored["end"] = round(
-            self._restore_speech_time(
-                float(segment.get("end", chunk_duration)),
-                speech_segments,
-                is_end=True,
-            ),
-            3,
-        )
-        return restored
-
-    def _restore_speech_time(
-        self,
-        time_in_speech: float,
-        speech_segments: list[tuple[float, float]],
-        *,
-        is_end: bool,
-    ) -> float:
-        """Convert compacted speech time to the equivalent time in the chunk timeline."""
-        if not speech_segments:
-            return time_in_speech
-
-        remaining = max(0.0, time_in_speech)
-        last_end = float(speech_segments[-1][1])
-        for index, (seg_start, seg_end) in enumerate(speech_segments):
-            seg_start = float(seg_start)
-            seg_end = float(seg_end)
-            duration = max(0.0, seg_end - seg_start)
-            if remaining < duration:
-                return seg_start + remaining
-            if abs(remaining - duration) <= 1e-9:
-                if is_end or index == len(speech_segments) - 1:
-                    return seg_end
-                return float(speech_segments[index + 1][0])
-            remaining -= duration
-
-        return last_end
 
     def _append_asr_segments(
         self,
