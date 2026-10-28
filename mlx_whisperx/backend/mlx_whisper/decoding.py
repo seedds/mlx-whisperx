@@ -107,6 +107,9 @@ class DecodingOptions:
     # "alpha" in Google NMT, or None for length norm, when ranking generations
     # to select which to return among the beams or best-of-N samples
     length_penalty: Optional[float] = None
+    # beams or best-of-N samples above this gzip compression ratio lose the ranking
+    # to any that stay under it, or None to rank on likelihood alone
+    compression_ratio_threshold: Optional[float] = None
 
     # text or tokens to feed as the prompt or the prefix; for more info:
     # https://github.com/openai/whisper/discussions/117#discussioncomment-3727051
@@ -723,6 +726,34 @@ class DecodingTask:
 
         return options
 
+    def _demote_repetition_loops(
+        self, tokens: List[List[List[int]]], sum_logprobs: List[List[float]]
+    ) -> List[List[float]]:
+        """Rank scores with looping candidates pushed below every non-looping one.
+
+        A decoder loop repeats tokens it is already sure of, so it out-scores real
+        text on likelihood: given one looping sample out of five, the ranker keeps
+        the loop, and the temperature fallback then rejects it and retries hotter,
+        where the same happens again. A loop only wins when every candidate loops.
+        """
+        threshold = self.options.compression_ratio_threshold
+        if threshold is None or self.n_group == 1:
+            return sum_logprobs
+
+        demoted = []
+        for group_tokens, group_logprobs in zip(tokens, sum_logprobs):
+            loops = [
+                compression_ratio(self.tokenizer.decode(t).strip()) > threshold
+                for t in group_tokens
+            ]
+            if all(loops):
+                demoted.append(group_logprobs)
+            else:
+                demoted.append(
+                    [-np.inf if loop else lp for loop, lp in zip(loops, group_logprobs)]
+                )
+        return demoted
+
     def _get_initial_tokens(self, prompt) -> Tuple[int]:
         """Build the prompt prefix fed before generated tokens."""
         tokens = list(self.sot_sequence)
@@ -949,7 +980,9 @@ class DecodingTask:
         tokens = [[t[: t.index(tokenizer.eot)] for t in s] for s in tokens]
 
         # select the top-ranked sample in each group
-        selected = self.sequence_ranker.rank(tokens, sum_logprobs)
+        selected = self.sequence_ranker.rank(
+            tokens, self._demote_repetition_loops(tokens, sum_logprobs)
+        )
         tokens: List[List[int]] = [t[i] for i, t in zip(selected, tokens)]
         texts: List[str] = [tokenizer.decode(t).strip() for t in tokens]
 

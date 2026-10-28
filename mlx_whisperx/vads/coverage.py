@@ -139,7 +139,16 @@ def energy_pauses(
     return pauses
 
 
-def is_repetition_loop(text: str, min_words: int = 8, dominance: float = 0.5) -> bool:
+# A unit of up to four characters repeated ten or more times in a row.
+_CHARACTER_RUN = re.compile(r"(.{1,4}?)\1{9,}", re.DOTALL)
+
+
+def is_repetition_loop(
+    text: str,
+    min_words: int = 8,
+    dominance: float = 0.5,
+    min_chars: int = 40,
+) -> bool:
     """True if one token dominates the text, the signature of a decoder loop.
 
     Fed music or noise, the decoder can emit a single word hundreds of times.
@@ -147,11 +156,24 @@ def is_repetition_loop(text: str, min_words: int = 8, dominance: float = 0.5) ->
     whether to retry at a hotter temperature -- and it is skipped entirely when
     `no_speech_prob` is high, which is precisely when loops occur.
 
-    Real dialogue does repeat ("no, no, no"), so the bar is deliberately high:
-    a majority of a long utterance being one token is not something speech does.
+    A loop can also run inside one word: a stretched shout decodes as "Doctooo"
+    followed by hundreds of "o", and scripts without spaces loop as one long run
+    of a single character. Neither has words to count, so runs of a short
+    repeated unit are measured by the characters they cover instead.
+
+    Real dialogue does repeat ("no, no, no", "Noooooo!"), so the bar is
+    deliberately high: a majority of a long utterance being one token, or one
+    repeated run, is not something speech does.
     """
-    words = re.findall(r"[^\W\d_]+", text.lower())
-    if len(words) < min_words:
+    lowered = text.lower()
+    words = re.findall(r"[^\W\d_]+", lowered)
+    if len(words) >= min_words:
+        _, count = Counter(words).most_common(1)[0]
+        if count / len(words) > dominance:
+            return True
+
+    compact = re.sub(r"\s+", "", lowered)
+    if len(compact) < min_chars:
         return False
-    _, count = Counter(words).most_common(1)[0]
-    return count / len(words) > dominance
+    looped = sum(len(match.group(0)) for match in _CHARACTER_RUN.finditer(compact))
+    return looped / len(compact) > dominance

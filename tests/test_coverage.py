@@ -213,6 +213,28 @@ class RepetitionLoopTests(unittest.TestCase):
     def test_punctuation_and_case_do_not_hide_a_loop(self):
         self.assertTrue(is_repetition_loop("Ten, ten. TEN! ten ten ten, ten ten ten ten."))
 
+    def test_loop_inside_one_word_is_a_loop(self):
+        # A stretched shout that never ends: one "word", so there is nothing to count.
+        self.assertTrue(is_repetition_loop("Doctooooctoo" + "o" * 900))
+
+    def test_loop_of_one_character_without_spaces_is_a_loop(self):
+        self.assertTrue(is_repetition_loop("八" * 300))
+
+    def test_loop_of_a_short_unit_is_a_loop(self):
+        self.assertTrue(is_repetition_loop("Do" + "-o" * 100))
+        self.assertTrue(is_repetition_loop("Ha" * 60 + "!"))
+
+    def test_stretched_word_in_real_speech_is_kept(self):
+        self.assertFalse(is_repetition_loop("Noooooooooooooooo!"))
+        self.assertFalse(is_repetition_loop("Hahahahahahahahahaha"))
+        self.assertFalse(
+            is_repetition_loop("Noooooooooooooooo, I told you that is not what happened at all.")
+        )
+        self.assertFalse(is_repetition_loop("Doctooooctor! Save your questions until... I have none, sir."))
+
+    def test_text_without_spaces_is_not_a_loop_by_itself(self):
+        self.assertFalse(is_repetition_loop("今日はとても良い天気ですね。散歩に行きましょうか。駅前の喫茶店で会いましょう。"))
+
 
 class ChunkTextGateTests(unittest.TestCase):
     def pipeline(self, **overrides):

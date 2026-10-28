@@ -180,7 +180,9 @@ def _decode_with_fallback(
             return model.decode(segment, fallback_options)
 
     for t in temperatures:
-        kwargs = {**decode_options}
+        # The ranker applies the same loop check the fallback does, so a group of
+        # candidates does not hand back the one sample that is bound to be rejected.
+        kwargs = {**decode_options, "compression_ratio_threshold": compression_ratio_threshold}
         if t > 0:
             kwargs.pop("beam_size", None)
             kwargs.pop("patience", None)
@@ -369,7 +371,7 @@ def _decode_batch_with_fallback(
     for t in temperatures:
         if not pending:
             break
-        kwargs = {**decode_options}
+        kwargs = {**decode_options, "compression_ratio_threshold": compression_ratio_threshold}
         if t > 0:
             kwargs.pop("beam_size", None)
             kwargs.pop("patience", None)

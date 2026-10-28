@@ -191,6 +191,33 @@ class BackendTranscribeTests(unittest.TestCase):
         self.assertEqual(calls[1][1], 0.2)
         self.assertEqual(len(calls[1][0]), 1)
 
+    def test_fallback_passes_the_loop_threshold_to_candidate_ranking(self):
+        transcribe = self._import_transcribe()
+        model = types.SimpleNamespace(
+            decode=mock.Mock(return_value=transcribe.DecodingResult(compression_ratio=1.5))
+        )
+
+        transcribe._decode_with_fallback(
+            model,
+            segment=object(),
+            temperature=0.2,
+            compression_ratio_threshold=2.4,
+            logprob_threshold=-1.0,
+            decode_options={"best_of": 5, "language": "en"},
+        )
+        transcribe._decode_batch_with_fallback(
+            model,
+            mx_array([10]),
+            temperature=0.2,
+            compression_ratio_threshold=2.4,
+            logprob_threshold=-1.0,
+            no_speech_threshold=0.6,
+            decode_options={"best_of": 5, "language": "en"},
+        )
+
+        for call in model.decode.call_args_list:
+            self.assertEqual(call.args[1].compression_ratio_threshold, 2.4)
+
     def test_batch_fallback_retries_keep_each_windows_own_prompt(self):
         transcribe = self._import_transcribe()
 
